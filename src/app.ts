@@ -12,29 +12,38 @@ import paymentsRoutes from "./routes/payments";
 import dashboardRoutes from "./routes/dashboard";
 import reportsRoutes from "./routes/reports";
 import { authMiddleware } from "./middleware/auth";
-
+import stripeRouter, { stripeWebhookHandler } from "./routes/stripe";
 
 dotenv.config();
 
 const app = express();
 const prisma = new PrismaClient();
 
-app.use(cors());
-app.use(express.json());
+// 🔹 CORS – allow all origins for now (including Vercel)
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: true,        // reflect request origin
     credentials: true,
   })
 );
 
-// PUBLIC ROUTES
+// 🔹 Stripe webhook (raw body)
+app.post(
+  "/api/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhookHandler
+);
+
+// 🔹 JSON body parser for the rest of your API
+app.use(express.json());
+
+// 🔹 Public routes
 app.use("/api/auth", authRoutes);
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-// PROTECTED ROUTES
+// 🔹 Protected routes
 app.use("/api/clients", authMiddleware, clientsRoutes);
 app.use("/api/activities", authMiddleware, activitiesRoutes);
 app.use("/api/ai", authMiddleware, aiRoutes);
@@ -42,9 +51,9 @@ app.use("/api/invoices", authMiddleware, invoicesRoutes);
 app.use("/api/payments", authMiddleware, paymentsRoutes);
 app.use("/api/dashboard", authMiddleware, dashboardRoutes);
 app.use("/api/reports", authMiddleware, reportsRoutes);
-app.use("/api/invoices", invoicesRoutes);
-app.use(express.json());
 
+// 🔹 Non-webhook Stripe routes (currently stubbed)
+app.use("/api/stripe", stripeRouter);
 
 const PORT = process.env.PORT || 4000;
 
