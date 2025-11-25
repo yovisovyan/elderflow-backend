@@ -12,6 +12,7 @@ model Organization {
   name         String
   contactEmail String
   billingPlan  String
+  billingRulesJson Json?  
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
