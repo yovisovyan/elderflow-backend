@@ -15,6 +15,8 @@ import { authMiddleware } from "./middleware/auth";
 import stripeRouter, { stripeWebhookHandler } from "./routes/stripe";
 import usersRoutes from "./routes/users";
 import { requireAdmin } from "./middleware/requireAdmin";
+import billingRulesRoutes from "./routes/billingRules";
+
 
 
 
