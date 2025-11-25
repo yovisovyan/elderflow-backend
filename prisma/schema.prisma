@@ -23,6 +23,8 @@ model Organization {
   payments   Payment[]
   reports    Report[]
   auditLogs  AuditLog[]
+  serviceTypes ServiceType[]
+
 }
 
 model User {
@@ -88,6 +90,10 @@ model Activity {
   capturedByAi Boolean      @default(false)
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
+
+  serviceTypeId String?
+  serviceType   ServiceType? @relation(fields: [serviceTypeId], references: [id])
+
 
   invoiceItems InvoiceItem[]
 }
@@ -175,6 +181,21 @@ model AuditLog {
   userId String?
   org    Organization @relation(fields: [orgId], references: [id])
   user   User?        @relation(fields: [userId], references: [id])
+}
+
+model ServiceType {
+  id          String       @id @default(uuid())
+  orgId       String
+  org         Organization @relation(fields: [orgId], references: [id])
+  name        String
+  billingCode String?
+  rateType    String       // "hourly" | "flat"
+  rateAmount  Float
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  activities  Activity[]
 }
 
 

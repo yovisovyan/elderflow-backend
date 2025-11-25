@@ -15,6 +15,8 @@ import { authMiddleware } from "./middleware/auth";
 import usersRoutes from "./routes/users";
 import billingRulesRoutes from "./routes/billingRules";
 import stripeRouter, { stripeWebhookHandler } from "./routes/stripe";
+import serviceTypesRoutes from "./routes/serviceTypes";
+
 
 dotenv.config();
 
@@ -54,6 +56,8 @@ app.use("/api/invoices", authMiddleware, invoicesRoutes);
 app.use("/api/payments", authMiddleware, paymentsRoutes);
 app.use("/api/dashboard", authMiddleware, dashboardRoutes);
 app.use("/api/reports", authMiddleware, reportsRoutes);
+app.use("/api/service-types", authMiddleware, serviceTypesRoutes);
+
 
 // 🔹 Admin-only user management
 app.use("/api/users", authMiddleware, usersRoutes);
