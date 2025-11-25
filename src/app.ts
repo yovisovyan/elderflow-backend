@@ -12,23 +12,19 @@ import paymentsRoutes from "./routes/payments";
 import dashboardRoutes from "./routes/dashboard";
 import reportsRoutes from "./routes/reports";
 import { authMiddleware } from "./middleware/auth";
-import stripeRouter, { stripeWebhookHandler } from "./routes/stripe";
 import usersRoutes from "./routes/users";
-import { requireAdmin } from "./middleware/requireAdmin";
 import billingRulesRoutes from "./routes/billingRules";
-
-
-
+import stripeRouter, { stripeWebhookHandler } from "./routes/stripe";
 
 dotenv.config();
 
 const app = express();
 const prisma = new PrismaClient();
 
-// 🔹 CORS – allow all origins for now (including Vercel)
+// 🔹 CORS – allow all origins for now (Vercel + local)
 app.use(
   cors({
-    origin: true,        // reflect request origin
+    origin: true, // reflect request origin
     credentials: true,
   })
 );
@@ -45,11 +41,12 @@ app.use(express.json());
 
 // 🔹 Public routes
 app.use("/api/auth", authRoutes);
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-// PROTECTED ROUTES
+// 🔹 Protected routes
 app.use("/api/clients", authMiddleware, clientsRoutes);
 app.use("/api/activities", authMiddleware, activitiesRoutes);
 app.use("/api/ai", authMiddleware, aiRoutes);
@@ -58,8 +55,11 @@ app.use("/api/payments", authMiddleware, paymentsRoutes);
 app.use("/api/dashboard", authMiddleware, dashboardRoutes);
 app.use("/api/reports", authMiddleware, reportsRoutes);
 
-// NEW: admin-only user management
-app.use("/api/users", authMiddleware, requireAdmin, usersRoutes);
+// 🔹 Admin-only user management
+app.use("/api/users", authMiddleware, usersRoutes);
+
+// 🔹 Org billing rules (GET for any authed user, POST is admin-only inside the route)
+app.use("/api/billing/rules", authMiddleware, billingRulesRoutes);
 
 // 🔹 Non-webhook Stripe routes (currently stubbed)
 app.use("/api/stripe", stripeRouter);

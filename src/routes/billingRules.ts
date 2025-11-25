@@ -8,7 +8,6 @@ const router = Router();
 
 /**
  * GET /api/billing/rules
- * Returns the organization-wide billing rules.
  */
 router.get("/", async (req: AuthRequest, res: Response) => {
   try {
@@ -32,7 +31,7 @@ router.get("/", async (req: AuthRequest, res: Response) => {
 
 /**
  * POST /api/billing/rules
- * ADMIN ONLY - Save organization-wide rules.
+ * ADMIN ONLY
  */
 router.post("/", requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
