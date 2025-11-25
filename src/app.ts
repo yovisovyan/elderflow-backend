@@ -13,6 +13,10 @@ import dashboardRoutes from "./routes/dashboard";
 import reportsRoutes from "./routes/reports";
 import { authMiddleware } from "./middleware/auth";
 import stripeRouter, { stripeWebhookHandler } from "./routes/stripe";
+import usersRoutes from "./routes/users";
+import { requireAdmin } from "./middleware/requireAdmin";
+
+
 
 dotenv.config();
 
@@ -43,7 +47,7 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-// 🔹 Protected routes
+// PROTECTED ROUTES
 app.use("/api/clients", authMiddleware, clientsRoutes);
 app.use("/api/activities", authMiddleware, activitiesRoutes);
 app.use("/api/ai", authMiddleware, aiRoutes);
@@ -51,6 +55,9 @@ app.use("/api/invoices", authMiddleware, invoicesRoutes);
 app.use("/api/payments", authMiddleware, paymentsRoutes);
 app.use("/api/dashboard", authMiddleware, dashboardRoutes);
 app.use("/api/reports", authMiddleware, reportsRoutes);
+
+// NEW: admin-only user management
+app.use("/api/users", authMiddleware, requireAdmin, usersRoutes);
 
 // 🔹 Non-webhook Stripe routes (currently stubbed)
 app.use("/api/stripe", stripeRouter);

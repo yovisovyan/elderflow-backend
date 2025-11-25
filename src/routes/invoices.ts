@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth";
+import { requireAdmin } from "../middleware/requireAdmin";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -27,8 +28,9 @@ function buildInvoiceItemsFromActivities(
  * POST /api/invoices/generate
  * Body: { clientId, periodStart, periodEnd }
  * Creates a draft invoice from billable activities for a given client + date range.
+ * ADMIN ONLY (requires admin role)
  */
-router.post("/generate", async (req: AuthRequest, res) => {
+router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
@@ -127,6 +129,7 @@ router.post("/generate", async (req: AuthRequest, res) => {
 /**
  * GET /api/invoices
  * Query: clientId? status?
+ * Any authenticated user (admin or care_manager) can view invoices.
  */
 router.get("/", async (req: AuthRequest, res) => {
   try {
@@ -162,6 +165,7 @@ router.get("/", async (req: AuthRequest, res) => {
  * GET /api/invoices/export/csv
  * Optional query: status, clientId
  * Returns CSV of invoices for download.
+ * (View/export: allowed for any authenticated user)
  */
 router.get("/export/csv", async (req: AuthRequest, res) => {
   try {
@@ -238,6 +242,7 @@ router.get("/export/csv", async (req: AuthRequest, res) => {
 /**
  * GET /api/invoices/:id/pdf
  * Returns a very simple PDF for the invoice (stub – replace with real PDF later).
+ * Any authenticated user can view.
  */
 router.get("/:id/pdf", async (req: AuthRequest, res) => {
   try {
@@ -266,7 +271,9 @@ router.get("/:id/pdf", async (req: AuthRequest, res) => {
       `%PDF-1.3
 1 0 obj<<>>endobj
 2 0 obj<< /Length ${44 + text.length} >>stream
-BT /F1 12 Tf 50 750 Td (${text.replace(/\(/g, "\\(").replace(/\)/g, "\\)")}) Tj ET
+BT /F1 12 Tf 50 750 Td (${text
+        .replace(/\(/g, "\\(")
+        .replace(/\)/g, "\\)")}) Tj ET
 endstream endobj
 3 0 obj<< /Type /Catalog /Pages 4 0 R >>endobj
 4 0 obj<< /Type /Pages /Kids [5 0 R] /Count 1 >>endobj
@@ -304,6 +311,7 @@ startxref
 /**
  * GET /api/invoices/:id
  * Returns invoice with items and payments and computed totals.
+ * Any authenticated user can view.
  */
 router.get("/:id", async (req: AuthRequest, res) => {
   try {
@@ -341,7 +349,11 @@ router.get("/:id", async (req: AuthRequest, res) => {
   }
 });
 
-router.post("/:id/approve", async (req: AuthRequest, res) => {
+/**
+ * POST /api/invoices/:id/approve
+ * ADMIN ONLY – mark invoice as "sent"
+ */
+router.post("/:id/approve", requireAdmin, async (req: AuthRequest, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
@@ -378,8 +390,9 @@ router.post("/:id/approve", async (req: AuthRequest, res) => {
  * Body: { amount, method, reference? }
  * - Creates a Payment record
  * - Updates invoice status to "paid" if fully covered
+ * ADMIN ONLY – treat payments as billing action
  */
-router.post("/:id/mark-paid", async (req: AuthRequest, res) => {
+router.post("/:id/mark-paid", requireAdmin, async (req: AuthRequest, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
@@ -473,13 +486,10 @@ router.post("/:id/mark-paid", async (req: AuthRequest, res) => {
  * Update invoice status (admin only)
  * Body: { status: "draft" | "sent" | "paid" | "overdue" }
  */
-router.patch("/:id", async (req: AuthRequest, res) => {
+router.patch("/:id", requireAdmin, async (req: AuthRequest, res) => {
   try {
     if (!req.user) {
       return res.status(401).json({ error: "Unauthorized" });
-    }
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "Only admin can update invoices" });
     }
 
     const { id } = req.params;
