@@ -41,6 +41,8 @@ router.get("/summary", async (req: AuthRequest, res: Response) => {
           cmId,
           startTime: { gte: thirtyDaysAgo },
         },
+        // no include needed here for summary, only duration/isBillable
+        orderBy: { startTime: "desc" },
       }),
       prisma.activity.findMany({
         where: {
@@ -56,7 +58,11 @@ router.get("/summary", async (req: AuthRequest, res: Response) => {
       }),
     ]);
 
-    const sumMinutes = (rows: typeof last7, billableOnly = false) =>
+    // just care about duration + isBillable
+    const sumMinutes = (
+      rows: { duration: number | null; isBillable: boolean }[],
+      billableOnly = false
+    ) =>
       rows.reduce((sum, a) => {
         if (billableOnly && !a.isBillable) return sum;
         return sum + (a.duration || 0);
