@@ -44,6 +44,8 @@ router.get("/", requireAdmin, async (req: AuthRequest, res: Response) => {
         email: u.email,
         role: u.role,
         clientsCount: u._count.clients,
+        profileImageUrl: u.profileImageUrl,
+        title: u.title,
         createdAt: u.createdAt,
       })),
     });
@@ -56,7 +58,6 @@ router.get("/", requireAdmin, async (req: AuthRequest, res: Response) => {
 /**
  * GET /api/users/:id/summary
  * Admin-only – details for a specific user with assigned clients.
- * This is used by /team/[userId] in the frontend.
  */
 router.get(
   "/:id/summary",
@@ -67,7 +68,6 @@ router.get(
 
       const { id } = req.params;
 
-      // Look up by id first, then enforce org
       const user = await prisma.user.findUnique({
         where: { id },
         select: {
@@ -77,6 +77,9 @@ router.get(
           role: true,
           createdAt: true,
           orgId: true,
+          profileImageUrl: true,
+          title: true,
+          phone: true,
         },
       });
 
@@ -104,6 +107,9 @@ router.get(
           email: user.email,
           role: user.role,
           createdAt: user.createdAt,
+          profileImageUrl: user.profileImageUrl,
+          title: user.title,
+          phone: user.phone,
         },
         clients,
       });
@@ -119,7 +125,7 @@ router.get(
 /**
  * POST /api/users
  * Admin-only – create a new user (role: care_manager or admin).
- * (Your original logic, preserved and extended)
+ * Body: { name, email, password, role?, profileImageUrl?, title?, phone?, clientIds?[] }
  */
 router.post("/", async (req: AuthRequest, res: Response) => {
   try {
@@ -140,11 +146,24 @@ router.post("/", async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { name, email, password, role } = req.body as {
+    const {
+      name,
+      email,
+      password,
+      role,
+      profileImageUrl,
+      title,
+      phone,
+      clientIds,
+    } = req.body as {
       name?: string;
       email?: string;
       password?: string;
       role?: string;
+      profileImageUrl?: string;
+      title?: string;
+      phone?: string;
+      clientIds?: string[];
     };
 
     if (!name || !email || !password) {
@@ -165,14 +184,39 @@ router.post("/", async (req: AuthRequest, res: Response) => {
         name: name.trim(),
         email: email.trim().toLowerCase(),
         password: passwordHash,
+        profileImageUrl: profileImageUrl?.trim() || null,
+        title: title?.trim() || null,
+        phone: phone?.trim() || null,
       },
     });
+
+    // Assign clients at creation if care_manager and clientIds provided
+    if (
+      normalizedRole === "care_manager" &&
+      Array.isArray(clientIds) &&
+      clientIds.length > 0
+    ) {
+      await prisma.client.updateMany({
+        where: {
+          orgId: authUser.orgId,
+          id: {
+            in: clientIds,
+          },
+        },
+        data: {
+          primaryCMId: user.id,
+        },
+      });
+    }
 
     return res.status(201).json({
       id: user.id,
       name: user.name,
       email: user.email,
       role: user.role,
+      profileImageUrl: user.profileImageUrl,
+      title: user.title,
+      phone: user.phone,
     });
   } catch (err: any) {
     console.error("Error creating user:", err);
@@ -189,9 +233,6 @@ router.post("/", async (req: AuthRequest, res: Response) => {
  * POST /api/users/:id/assign-clients
  * Admin-only – assign clients to a care manager.
  * Body: { clientIds: string[] }
- *
- * NOTE: For now, we only ensure the specified clientIds are assigned to this CM.
- * We do not automatically unassign other clients to avoid null issues if primaryCMId is non-nullable.
  */
 router.post(
   "/:id/assign-clients",
@@ -260,6 +301,9 @@ router.post(
           name: user.name,
           email: user.email,
           role: user.role,
+          profileImageUrl: user.profileImageUrl,
+          title: user.title,
+          phone: user.phone,
         },
         clients,
       });
@@ -268,6 +312,52 @@ router.post(
       return res
         .status(500)
         .json({ error: "Failed to assign clients to user." });
+    }
+  }
+);
+
+/**
+ * DELETE /api/users/:id
+ * Admin-only – delete a care manager.
+ * Safety: prevent delete if they still own any clients.
+ */
+router.delete(
+  "/:id",
+  requireAdmin,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { id } = req.params;
+
+      const user = await prisma.user.findUnique({
+        where: { id },
+        include: {
+          _count: {
+            select: { clients: true },
+          },
+        },
+      });
+
+      if (!user || user.orgId !== req.user.orgId) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (user._count.clients > 0) {
+        return res.status(400).json({
+          error:
+            "This care manager still has assigned clients. Reassign or remove clients before deleting.",
+        });
+      }
+
+      await prisma.user.delete({
+        where: { id: user.id },
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error deleting user:", err);
+      return res.status(500).json({ error: "Failed to delete user." });
     }
   }
 );
