@@ -461,4 +461,109 @@ router.delete(
   }
 );
 
+/**
+ * GET /api/users/:id/metrics
+ * Admin-only – activity metrics for a specific care manager.
+ * Used by the Team list to show hours + billable ratio.
+ */
+router.get(
+  "/:id/metrics",
+  requireAdmin,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { id } = req.params;
+
+      // Find user and verify same org
+      const user = await prisma.user.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          role: true,
+          orgId: true,
+        },
+      });
+
+      if (!user || user.orgId !== req.user.orgId) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Only makes sense for care managers, but we can still compute for others
+      const cmId = user.id;
+      const orgId = user.orgId;
+
+      const now = new Date();
+      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const thirtyDaysAgo = new Date(
+        now.getTime() - 30 * 24 * 60 * 60 * 1000
+      );
+
+      const [last7, last30] = await Promise.all([
+        prisma.activity.findMany({
+          where: {
+            orgId,
+            cmId,
+            startTime: { gte: sevenDaysAgo },
+          },
+          select: {
+            duration: true,
+            isBillable: true,
+          },
+        }),
+        prisma.activity.findMany({
+          where: {
+            orgId,
+            cmId,
+            startTime: { gte: thirtyDaysAgo },
+          },
+          select: {
+            duration: true,
+            isBillable: true,
+          },
+        }),
+      ]);
+
+      const sumMinutes = (
+        rows: { duration: number | null; isBillable: boolean }[],
+        billableOnly = false
+      ) =>
+        rows.reduce((sum, a) => {
+          if (billableOnly && !a.isBillable) return sum;
+          return sum + (a.duration || 0);
+        }, 0);
+
+      const last30Minutes = sumMinutes(last30);
+      const last30BillableMinutes = sumMinutes(last30, true);
+      const last30Hours = last30Minutes / 60;
+      const last30BillableHours = last30BillableMinutes / 60;
+
+      const billableRatio =
+        last30Hours > 0
+          ? Number((last30BillableHours / last30Hours).toFixed(2))
+          : 0;
+
+      const last7Minutes = sumMinutes(last7);
+      const last7Hours = last7Minutes / 60;
+
+      return res.json({
+        last7Days: {
+          hours: Number(last7Hours.toFixed(2)),
+        },
+        last30Days: {
+          hours: Number(last30Hours.toFixed(2)),
+          billableHours: Number(last30BillableHours.toFixed(2)),
+          billableRatio, // 0–1
+        },
+      });
+    } catch (err) {
+      console.error("Error fetching user metrics:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to fetch user metrics." });
+    }
+  }
+);
+
+
 export default router;
