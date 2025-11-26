@@ -10,6 +10,9 @@ const prisma = new PrismaClient();
  * Query params:
  *  - clientId (optional)
  *  - flagged (optional: "true" or "false")
+ *
+ * Admin: all activities in org (optionally filtered)
+ * Care manager: ONLY activities they logged (cmId = current user)
  */
 router.get("/", async (req: AuthRequest, res) => {
   try {
@@ -25,12 +28,18 @@ router.get("/", async (req: AuthRequest, res) => {
     if (flagged === "true") where.isFlagged = true;
     if (flagged === "false") where.isFlagged = false;
 
+    // 🔹 Care managers only see activities they logged themselves
+    if (req.user.role === "care_manager") {
+      where.cmId = req.user.userId;
+    }
+
     const activities = await prisma.activity.findMany({
       where,
       orderBy: { startTime: "desc" },
       include: {
         client: true,
         cm: true,
+        serviceType: true,
       },
     });
 
@@ -44,6 +53,8 @@ router.get("/", async (req: AuthRequest, res) => {
 /**
  * GET /api/activities/:id
  * Returns a single activity with related client & care manager.
+ *
+ * Care managers can only see their own activities.
  */
 router.get("/:id", async (req: AuthRequest, res) => {
   try {
@@ -59,11 +70,22 @@ router.get("/:id", async (req: AuthRequest, res) => {
       include: {
         client: true,
         cm: true,
+        serviceType: true,
       },
     });
 
     if (!activity) {
       return res.status(404).json({ error: "Activity not found" });
+    }
+
+    // 🔹 Care manager cannot view other users' activities
+    if (
+      req.user.role === "care_manager" &&
+      activity.cmId !== req.user.userId
+    ) {
+      return res
+        .status(403)
+        .json({ error: "You are not allowed to view this activity." });
     }
 
     res.json(activity);
@@ -81,9 +103,9 @@ router.get("/:id", async (req: AuthRequest, res) => {
  *  - source ("phone" | "email" | "visit" | "manual")
  *  - startTime (ISO string)
  *  - endTime (ISO string)
- *  - billingCode (optional)
  *  - isBillable (boolean)
  *  - notes (string)
+ *  - serviceTypeId (optional)
  */
 router.post("/", async (req: AuthRequest, res) => {
   try {
@@ -91,25 +113,52 @@ router.post("/", async (req: AuthRequest, res) => {
 
     const {
       clientId,
-      source,
       startTime,
       endTime,
-      billingCode,
-      isBillable,
+      duration,
       notes,
-    } = req.body;
+      source,
+      isBillable,
+      serviceTypeId,
+    } = req.body as {
+      clientId?: string;
+      startTime?: string;
+      endTime?: string;
+      duration?: number;
+      notes?: string | null;
+      source?: string;
+      isBillable?: boolean;
+      serviceTypeId?: string | null;
+    };
 
     if (!clientId || !source || !startTime || !endTime) {
-      return res
-        .status(400)
-        .json({ error: "clientId, source, startTime, endTime are required" });
+      return res.status(400).json({
+        error: "clientId, source, startTime, endTime are required",
+      });
     }
-
-    
 
     const start = new Date(startTime);
     const end = new Date(endTime);
-    const duration = Math.round((end.getTime() - start.getTime()) / 60000); // minutes
+    const computedDuration =
+      duration ?? Math.round((end.getTime() - start.getTime()) / 60000);
+
+    // --- Validate serviceTypeId if provided ---
+    let finalServiceTypeId: string | null = null;
+    if (serviceTypeId) {
+      const svc = await prisma.serviceType.findFirst({
+        where: {
+          id: serviceTypeId,
+          orgId: req.user.orgId,
+          isActive: true,
+        },
+      });
+
+      if (!svc) {
+        return res.status(400).json({ error: "Invalid serviceTypeId" });
+      }
+
+      finalServiceTypeId = svc.id;
+    }
 
     const activity = await prisma.activity.create({
       data: {
@@ -119,13 +168,19 @@ router.post("/", async (req: AuthRequest, res) => {
         source,
         startTime: start,
         endTime: end,
-        duration,
-        billingCode: billingCode ?? null,
+        duration: computedDuration,
+        billingCode: null,
         isBillable: isBillable ?? true,
-        aiConfidence: 0.95, // manual entry assumed high confidence
+        aiConfidence: 0.95,
         notes: notes ?? "",
         isFlagged: false,
         capturedByAi: false,
+        serviceTypeId: finalServiceTypeId,
+      },
+      include: {
+        client: true,
+        cm: true,
+        serviceType: true,
       },
     });
 
@@ -134,10 +189,6 @@ router.post("/", async (req: AuthRequest, res) => {
     console.error("Error creating activity:", err);
     res.status(500).json({ error: "Failed to create activity" });
   }
-  
 });
-
-
-
 
 export default router;
