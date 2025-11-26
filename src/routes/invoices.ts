@@ -6,29 +6,74 @@ import { requireAdmin } from "../middleware/requireAdmin";
 const router = Router();
 const prisma = new PrismaClient();
 
-/**
- * Helper: compute invoice items from activities and client billing rules.
- */
-function buildInvoiceItemsFromActivities(
-  activities: { id: string; duration: number }[],
-  hourlyRate: number
-) {
-  const items = activities.map((a) => {
-    const quantity = +(a.duration / 60).toFixed(2); // hours
-    const unitPrice = hourlyRate;
-    const amount = +(quantity * unitPrice).toFixed(2);
-    return { activityId: a.id, quantity, unitPrice, amount };
-  });
+type InvoiceStatus = "draft" | "sent" | "paid" | "overdue" | string;
 
-  const totalAmount = items.reduce((sum, i) => sum + i.amount, 0);
-  return { items, totalAmount };
+/**
+ * Helper: round to 2 decimal places
+ */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * Helper: get billing rule values from client/org rules
+ */
+function getBillingContext(
+  clientRules: any,
+  orgRules: any
+): {
+  hourlyRate: number;
+  minDuration: number;
+  rounding: "none" | "6m" | "15m";
+} {
+  const hourlyRate =
+    Number(clientRules?.hourlyRate) ||
+    Number(orgRules?.hourlyRate) ||
+    150;
+
+  const minDuration =
+    Number(clientRules?.minDuration) ||
+    Number(orgRules?.minDuration) ||
+    0;
+
+  const rounding: "none" | "6m" | "15m" =
+    clientRules?.rounding === "6m" ||
+    clientRules?.rounding === "15m"
+      ? clientRules.rounding
+      : orgRules?.rounding === "6m" || orgRules?.rounding === "15m"
+      ? orgRules.rounding
+      : "none";
+
+  return { hourlyRate, minDuration, rounding };
+}
+
+/**
+ * Helper: apply minDuration + rounding to minutes
+ */
+function adjustMinutes(
+  minutes: number,
+  minDuration: number,
+  rounding: "none" | "6m" | "15m"
+): number {
+  let m = minutes;
+  if (minDuration > 0 && m < minDuration) {
+    m = minDuration;
+  }
+
+  if (rounding === "6m") {
+    m = Math.round(m / 6) * 6;
+  } else if (rounding === "15m") {
+    m = Math.round(m / 15) * 15;
+  }
+
+  return m;
 }
 
 /**
  * POST /api/invoices/generate
  * Body: { clientId, periodStart, periodEnd }
  * Creates a draft invoice from billable activities for a given client + date range.
- * ADMIN ONLY (requires admin role)
+ * ADMIN ONLY
  */
 router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
   try {
@@ -42,21 +87,41 @@ router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
         .json({ error: "clientId, periodStart, periodEnd are required" });
     }
 
-    const client = await prisma.client.findFirst({
-      where: {
-        id: clientId,
-        orgId: req.user.orgId,
-      },
-    });
+    // Load organization & client with rules
+    const [org, client] = await Promise.all([
+      prisma.organization.findUnique({
+        where: { id: req.user.orgId },
+        select: { billingRulesJson: true },
+      }),
+      prisma.client.findFirst({
+        where: {
+          id: clientId,
+          orgId: req.user.orgId,
+        },
+        select: {
+          id: true,
+          orgId: true,
+          billingRulesJson: true,
+        },
+      }),
+    ]);
 
     if (!client) {
       return res.status(404).json({ error: "Client not found" });
     }
 
+    const orgRules = (org?.billingRulesJson as any) || {};
+    const clientRules = (client.billingRulesJson as any) || {};
+
+    const { hourlyRate, minDuration, rounding } = getBillingContext(
+      clientRules,
+      orgRules
+    );
+
     const start = new Date(periodStart);
     const end = new Date(periodEnd);
 
-    // Get billable activities in range
+    // Get billable activities in range, including service type
     const activities = await prisma.activity.findMany({
       where: {
         orgId: req.user.orgId,
@@ -69,6 +134,9 @@ router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
           lte: end,
         },
       },
+      include: {
+        serviceType: true,
+      },
     });
 
     if (!activities.length) {
@@ -77,12 +145,83 @@ router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
         .json({ error: "No billable activities found for this period" });
     }
 
-    const rules = (client.billingRulesJson as any) || {};
-    const hourlyRate = rules.hourly_rate || rules.hourlyRate || 150;
+    // Build invoice items
+    const items: {
+      activityId: string | null;
+      description: string;
+      quantity: number;
+      unitPrice: number;
+      amount: number;
+    }[] = [];
 
-    const { items, totalAmount } = buildInvoiceItemsFromActivities(
-      activities.map((a) => ({ id: a.id, duration: a.duration })),
-      hourlyRate
+    for (const activity of activities) {
+      const durationMinutes =
+        activity.duration ||
+        Math.max(
+          0,
+          Math.round(
+            (activity.endTime.getTime() - activity.startTime.getTime()) / 60000
+          )
+        );
+
+      const svc = activity.serviceType;
+
+      let description = "Care Management Services";
+      let quantity = 0;
+      let unitPrice = 0;
+      let amount = 0;
+
+      if (svc) {
+        description = svc.name;
+        unitPrice = svc.rateAmount || 0;
+
+        if (svc.rateType === "flat") {
+          // Flat = one unit at the flat rate
+          quantity = 1;
+          amount = round2(unitPrice);
+        } else {
+          // Hourly service type
+          const adjustedMinutes = adjustMinutes(
+            durationMinutes,
+            minDuration,
+            rounding
+          );
+          quantity = adjustedMinutes / 60;
+          amount = round2(quantity * unitPrice);
+        }
+      } else {
+        // Fallback: no service type, use hourlyRate from rules
+        const adjustedMinutes = adjustMinutes(
+          durationMinutes,
+          minDuration,
+          rounding
+        );
+        quantity = adjustedMinutes / 60;
+        unitPrice = hourlyRate;
+        amount = round2(quantity * unitPrice);
+      }
+
+      // Skip zero-amount lines just in case
+      if (amount <= 0) continue;
+
+      items.push({
+        activityId: activity.id,
+        description,
+        quantity,
+        unitPrice,
+        amount,
+      });
+    }
+
+    if (!items.length) {
+      return res.status(400).json({
+        error:
+          "No billable activities produced any invoiceable amounts with the current rules.",
+      });
+    }
+
+    const totalAmount = round2(
+      items.reduce((sum, i) => sum + i.amount, 0)
     );
 
     // Create invoice
@@ -99,23 +238,26 @@ router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
     });
 
     // Create invoice items
-    for (const item of items) {
-      await prisma.invoiceItem.create({
-        data: {
-          invoiceId: invoice.id,
-          activityId: item.activityId,
-          description: "Care Management Services",
-          quantity: item.quantity,
-          unitPrice: item.unitPrice,
-          amount: item.amount,
-        },
-      });
-    }
+    await Promise.all(
+      items.map((item) =>
+        prisma.invoiceItem.create({
+          data: {
+            invoiceId: invoice.id,
+            activityId: item.activityId,
+            description: item.description,
+            quantity: item.quantity,
+            unitPrice: item.unitPrice,
+            amount: item.amount,
+          },
+        })
+      )
+    );
 
     const fullInvoice = await prisma.invoice.findUnique({
       where: { id: invoice.id },
       include: {
         items: true,
+        client: true,
       },
     });
 
@@ -129,7 +271,6 @@ router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
 /**
  * GET /api/invoices
  * Query: clientId? status?
- * Any authenticated user (admin or care_manager) can view invoices.
  */
 router.get("/", async (req: AuthRequest, res) => {
   try {
@@ -163,9 +304,6 @@ router.get("/", async (req: AuthRequest, res) => {
 
 /**
  * GET /api/invoices/export/csv
- * Optional query: status, clientId
- * Returns CSV of invoices for download.
- * (View/export: allowed for any authenticated user)
  */
 router.get("/export/csv", async (req: AuthRequest, res) => {
   try {
@@ -188,7 +326,6 @@ router.get("/export/csv", async (req: AuthRequest, res) => {
       },
     });
 
-    // Build CSV header + rows
     const header = [
       "Invoice ID",
       "Client Name",
@@ -241,8 +378,6 @@ router.get("/export/csv", async (req: AuthRequest, res) => {
 
 /**
  * GET /api/invoices/:id/pdf
- * Returns a very simple PDF for the invoice (stub – replace with real PDF later).
- * Any authenticated user can view.
  */
 router.get("/:id/pdf", async (req: AuthRequest, res) => {
   try {
@@ -264,7 +399,6 @@ router.get("/:id/pdf", async (req: AuthRequest, res) => {
     const clientName = invoice.client?.name ?? "Unknown client";
     const total = invoice.totalAmount?.toFixed(2) ?? "0.00";
 
-    // Minimal PDF content (valid but simple). You can later replace this with PDFKit.
     const text = `Invoice #${invoice.id}  Client: ${clientName}  Total: $${total}`;
 
     const pdf = Buffer.from(
@@ -310,8 +444,6 @@ startxref
 
 /**
  * GET /api/invoices/:id
- * Returns invoice with items and payments and computed totals.
- * Any authenticated user can view.
  */
 router.get("/:id", async (req: AuthRequest, res) => {
   try {
@@ -353,138 +485,140 @@ router.get("/:id", async (req: AuthRequest, res) => {
  * POST /api/invoices/:id/approve
  * ADMIN ONLY – mark invoice as "sent"
  */
-router.post("/:id/approve", requireAdmin, async (req: AuthRequest, res) => {
-  try {
-    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+router.post(
+  "/:id/approve",
+  requireAdmin,
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-    const { id } = req.params;
+      const { id } = req.params;
 
-    const invoice = await prisma.invoice.findFirst({
-      where: {
-        id,
-        orgId: req.user.orgId,
-      },
-    });
+      const invoice = await prisma.invoice.findFirst({
+        where: {
+          id,
+          orgId: req.user.orgId,
+        },
+      });
 
-    if (!invoice) {
-      return res.status(404).json({ error: "Invoice not found" });
+      if (!invoice) {
+        return res.status(404).json({ error: "Invoice not found" });
+      }
+
+      const updated = await prisma.invoice.update({
+        where: { id: invoice.id },
+        data: {
+          status: "sent",
+          sentAt: new Date(),
+        },
+      });
+
+      res.json(updated);
+    } catch (err) {
+      console.error("Error approving invoice:", err);
+      res.status(500).json({ error: "Failed to approve invoice" });
     }
-
-    const updated = await prisma.invoice.update({
-      where: { id: invoice.id },
-      data: {
-        status: "sent",
-        sentAt: new Date(),
-      },
-    });
-
-    res.json(updated);
-  } catch (err) {
-    console.error("Error approving invoice:", err);
-    res.status(500).json({ error: "Failed to approve invoice" });
   }
-});
+);
 
 /**
  * POST /api/invoices/:id/mark-paid
- * Body: { amount, method, reference? }
- * - Creates a Payment record
- * - Updates invoice status to "paid" if fully covered
- * ADMIN ONLY – treat payments as billing action
+ * ADMIN ONLY
  */
-router.post("/:id/mark-paid", requireAdmin, async (req: AuthRequest, res) => {
-  try {
-    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+router.post(
+  "/:id/mark-paid",
+  requireAdmin,
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-    const { id } = req.params;
-    const { amount, method, reference } = req.body as {
-      amount?: number;
-      method?: string;
-      reference?: string;
-    };
+      const { id } = req.params;
+      const { amount, method, reference } = req.body as {
+        amount?: number;
+        method?: string;
+        reference?: string;
+      };
 
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ error: "Invalid payment amount" });
-    }
-    if (!method || typeof method !== "string") {
-      return res.status(400).json({ error: "Payment method required" });
-    }
-
-    const invoice = await prisma.invoice.findFirst({
-      where: {
-        id,
-        orgId: req.user.orgId,
-      },
-      include: {
-        payments: true,
-      },
-    });
-
-    if (!invoice) {
-      return res.status(404).json({ error: "Invoice not found" });
-    }
-
-    // Create payment
-    const payment = await prisma.payment.create({
-      data: {
-        orgId: req.user.orgId,
-        invoiceId: invoice.id,
-        status: "completed",
-        amount,
-        method,
-        reference: reference || null,
-        paidAt: new Date(),
-      },
-    });
-
-    // Recalculate total paid
-    const allPayments = [...(invoice.payments ?? []), payment].filter(
-      (p) => p.status === "completed"
-    );
-    const totalPaid = allPayments.reduce(
-      (sum, p) => sum + (p.amount || 0),
-      0
-    );
-
-    const remaining = (invoice.totalAmount || 0) - totalPaid;
-
-    let updatedStatus = invoice.status;
-    let paidAt = invoice.paidAt;
-
-    if (remaining <= 0) {
-      updatedStatus = "paid";
-      if (!paidAt) {
-        paidAt = new Date();
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Invalid payment amount" });
       }
+      if (!method || typeof method !== "string") {
+        return res.status(400).json({ error: "Payment method required" });
+      }
+
+      const invoice = await prisma.invoice.findFirst({
+        where: {
+          id,
+          orgId: req.user.orgId,
+        },
+        include: {
+          payments: true,
+        },
+      });
+
+      if (!invoice) {
+        return res.status(404).json({ error: "Invoice not found" });
+      }
+
+      const payment = await prisma.payment.create({
+        data: {
+          orgId: req.user.orgId,
+          invoiceId: invoice.id,
+          status: "completed",
+          amount,
+          method,
+          reference: reference || null,
+          paidAt: new Date(),
+        },
+      });
+
+      const allPayments = [...(invoice.payments ?? []), payment].filter(
+        (p) => p.status === "completed"
+      );
+      const totalPaid = allPayments.reduce(
+        (sum, p) => sum + (p.amount || 0),
+        0
+      );
+
+      const remaining = (invoice.totalAmount || 0) - totalPaid;
+
+      let updatedStatus: InvoiceStatus = invoice.status;
+      let paidAt = invoice.paidAt;
+
+      if (remaining <= 0) {
+        updatedStatus = "paid";
+        if (!paidAt) {
+          paidAt = new Date();
+        }
+      }
+
+      const updatedInvoice = await prisma.invoice.update({
+        where: { id: invoice.id },
+        data: {
+          status: updatedStatus,
+          paidAt,
+        },
+        include: {
+          items: true,
+          payments: true,
+          client: true,
+        },
+      });
+
+      res.json({
+        invoice: updatedInvoice,
+        balanceRemaining: remaining > 0 ? remaining : 0,
+      });
+    } catch (err) {
+      console.error("Error marking invoice as paid:", err);
+      res.status(500).json({ error: "Failed to mark invoice as paid" });
     }
-
-    const updatedInvoice = await prisma.invoice.update({
-      where: { id: invoice.id },
-      data: {
-        status: updatedStatus,
-        paidAt,
-      },
-      include: {
-        items: true,
-        payments: true,
-        client: true,
-      },
-    });
-
-    res.json({
-      invoice: updatedInvoice,
-      balanceRemaining: remaining > 0 ? remaining : 0,
-    });
-  } catch (err) {
-    console.error("Error marking invoice as paid:", err);
-    res.status(500).json({ error: "Failed to mark invoice as paid" });
   }
-});
+);
 
 /**
  * PATCH /api/invoices/:id
  * Update invoice status (admin only)
- * Body: { status: "draft" | "sent" | "paid" | "overdue" }
  */
 router.patch("/:id", requireAdmin, async (req: AuthRequest, res) => {
   try {
