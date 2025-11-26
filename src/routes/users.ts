@@ -565,5 +565,57 @@ router.get(
   }
 );
 
+/**
+ * GET /api/users/:id/recent-activities
+ * Admin-only – recent activities for a specific care manager.
+ * Used for the mini timeline on /team/[userId].
+ */
+router.get(
+  "/:id/recent-activities",
+  requireAdmin,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { id } = req.params;
+
+      const user = await prisma.user.findUnique({
+        where: { id },
+        select: { id: true, orgId: true, role: true },
+      });
+
+      if (!user || user.orgId !== req.user.orgId) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const orgId = user.orgId;
+      const cmId = user.id;
+
+      const recentActivities = await prisma.activity.findMany({
+        where: {
+          orgId,
+          cmId,
+        },
+        include: {
+          client: true,
+          serviceType: true,
+        },
+        orderBy: { startTime: "desc" },
+        take: 10,
+      });
+
+      return res.json({
+        recentActivities,
+      });
+    } catch (err) {
+      console.error("Error fetching CM recent activities:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to fetch CM recent activities." });
+    }
+  }
+);
+
+
 
 export default router;

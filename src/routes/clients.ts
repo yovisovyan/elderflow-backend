@@ -19,7 +19,7 @@ router.get("/", async (req: AuthRequest, res) => {
       orgId: req.user.orgId,
     };
 
-    // 🔹 Care managers only see their own clients
+    // 🔹 Care managers only see their own clientsa
     if (req.user.role === "care_manager") {
       where.primaryCMId = req.user.userId;
     }
@@ -55,6 +55,15 @@ router.get("/:id", async (req: AuthRequest, res) => {
         id,
         orgId: req.user.orgId,
       },
+      include: {
+        primaryCM: {
+          select: {
+            id: true,
+            name: true,
+            profileImageUrl: true,
+          },
+        },
+      },
     });
 
     if (!client) {
@@ -85,7 +94,7 @@ router.get("/:id", async (req: AuthRequest, res) => {
       },
     });
 
-    // total hours: sum of activity.duration / 60
+    // total billable duration
     const activities = await prisma.activity.findMany({
       where: {
         clientId: client.id,
@@ -94,10 +103,13 @@ router.get("/:id", async (req: AuthRequest, res) => {
       },
     });
 
-    const totalMinutes = activities.reduce((sum, a) => sum + a.duration, 0);
+    const totalMinutes = activities.reduce(
+      (sum, a) => sum + a.duration,
+      0
+    );
     const totalHoursBilled = totalMinutes / 60;
 
-    // outstanding balance = sum(invoice.totalAmount) - sum(payments.amount for completed)
+    // outstanding balance
     let outstandingBalance = 0;
     let lastInvoiceDate: Date | null = null;
 
@@ -107,9 +119,7 @@ router.get("/:id", async (req: AuthRequest, res) => {
         .reduce((sum, p) => sum + p.amount, 0);
 
       const remaining = inv.totalAmount - paidAmount;
-      if (remaining > 0) {
-        outstandingBalance += remaining;
-      }
+      if (remaining > 0) outstandingBalance += remaining;
 
       if (!lastInvoiceDate || (inv.periodEnd && inv.periodEnd > lastInvoiceDate)) {
         lastInvoiceDate = inv.periodEnd;
@@ -129,6 +139,7 @@ router.get("/:id", async (req: AuthRequest, res) => {
     res.status(500).json({ error: "Failed to fetch client" });
   }
 });
+
 
 /**
  * POST /api/clients
