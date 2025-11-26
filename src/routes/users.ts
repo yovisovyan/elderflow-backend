@@ -56,6 +56,7 @@ router.get("/", requireAdmin, async (req: AuthRequest, res: Response) => {
 /**
  * GET /api/users/:id/summary
  * Admin-only – details for a specific user with assigned clients.
+ * This is used by /team/[userId] in the frontend.
  */
 router.get(
   "/:id/summary",
@@ -66,21 +67,20 @@ router.get(
 
       const { id } = req.params;
 
-      const user = await prisma.user.findFirst({
-        where: {
-          id,
-          orgId: req.user.orgId,
-        },
+      // Look up by id first, then enforce org
+      const user = await prisma.user.findUnique({
+        where: { id },
         select: {
           id: true,
           name: true,
           email: true,
           role: true,
           createdAt: true,
+          orgId: true,
         },
       });
 
-      if (!user) {
+      if (!user || user.orgId !== req.user.orgId) {
         return res.status(404).json({ error: "User not found" });
       }
 
@@ -98,7 +98,13 @@ router.get(
       });
 
       return res.json({
-        user,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          createdAt: user.createdAt,
+        },
         clients,
       });
     } catch (err) {
@@ -113,7 +119,7 @@ router.get(
 /**
  * POST /api/users
  * Admin-only – create a new user (role: care_manager or admin).
- * (Your original logic, preserved and extended slightly)
+ * (Your original logic, preserved and extended)
  */
 router.post("/", async (req: AuthRequest, res: Response) => {
   try {
@@ -184,8 +190,8 @@ router.post("/", async (req: AuthRequest, res: Response) => {
  * Admin-only – assign clients to a care manager.
  * Body: { clientIds: string[] }
  *
- * NOTE: We only assign, we don't force-unassign others to avoid null issues
- * with primaryCMId being non-nullable in the schema.
+ * NOTE: For now, we only ensure the specified clientIds are assigned to this CM.
+ * We do not automatically unassign other clients to avoid null issues if primaryCMId is non-nullable.
  */
 router.post(
   "/:id/assign-clients",
@@ -203,14 +209,11 @@ router.post(
           .json({ error: "clientIds must be an array of client IDs." });
       }
 
-      const user = await prisma.user.findFirst({
-        where: {
-          id,
-          orgId: req.user.orgId,
-        },
+      const user = await prisma.user.findUnique({
+        where: { id },
       });
 
-      if (!user) {
+      if (!user || user.orgId !== req.user.orgId) {
         return res.status(404).json({ error: "User not found" });
       }
 
