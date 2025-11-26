@@ -17,7 +17,7 @@ router.get("/", async (req, res) => {
         const where = {
             orgId: req.user.orgId,
         };
-        // 🔹 Care managers only see their own clients
+        // 🔹 Care managers only see their own clientsa
         if (req.user.role === "care_manager") {
             where.primaryCMId = req.user.userId;
         }
@@ -50,6 +50,15 @@ router.get("/:id", async (req, res) => {
                 id,
                 orgId: req.user.orgId,
             },
+            include: {
+                primaryCM: {
+                    select: {
+                        id: true,
+                        name: true,
+                        profileImageUrl: true,
+                    },
+                },
+            },
         });
         if (!client) {
             return res.status(404).json({ error: "Client not found" });
@@ -74,7 +83,7 @@ router.get("/:id", async (req, res) => {
                 periodEnd: "desc",
             },
         });
-        // total hours: sum of activity.duration / 60
+        // total billable duration
         const activities = await prisma.activity.findMany({
             where: {
                 clientId: client.id,
@@ -84,7 +93,7 @@ router.get("/:id", async (req, res) => {
         });
         const totalMinutes = activities.reduce((sum, a) => sum + a.duration, 0);
         const totalHoursBilled = totalMinutes / 60;
-        // outstanding balance = sum(invoice.totalAmount) - sum(payments.amount for completed)
+        // outstanding balance
         let outstandingBalance = 0;
         let lastInvoiceDate = null;
         for (const inv of invoices) {
@@ -92,9 +101,8 @@ router.get("/:id", async (req, res) => {
                 .filter((p) => p.status === "completed")
                 .reduce((sum, p) => sum + p.amount, 0);
             const remaining = inv.totalAmount - paidAmount;
-            if (remaining > 0) {
+            if (remaining > 0)
                 outstandingBalance += remaining;
-            }
             if (!lastInvoiceDate || (inv.periodEnd && inv.periodEnd > lastInvoiceDate)) {
                 lastInvoiceDate = inv.periodEnd;
             }

@@ -51,20 +51,21 @@ router.get("/:id", async (req: AuthRequest, res) => {
     const { id } = req.params;
 
     const client = await prisma.client.findFirst({
-      where: {
-        id,
-        orgId: req.user.orgId,
+  where: {
+    id,
+    orgId: req.user.orgId,
+  },
+  include: {
+    primaryCM: {
+      select: {
+        id: true,
+        name: true,
+        profileImageUrl: true,
       },
-      include: {
-        primaryCM: {
-          select: {
-            id: true,
-            name: true,
-            profileImageUrl: true,
-          },
-        },
-      },
-    });
+    },
+  },
+});
+
 
     if (!client) {
       return res.status(404).json({ error: "Client not found" });
