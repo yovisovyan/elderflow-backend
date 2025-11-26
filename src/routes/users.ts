@@ -230,9 +230,92 @@ router.post("/", async (req: AuthRequest, res: Response) => {
 });
 
 /**
+ * PATCH /api/users/:id
+ * Admin-only – update care manager details (name, email, role, profile fields).
+ * Body: { name?, email?, role?, profileImageUrl?, title?, phone? }
+ */
+router.patch(
+  "/:id",
+  requireAdmin,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { id } = req.params;
+      const {
+        name,
+        email,
+        role,
+        profileImageUrl,
+        title,
+        phone,
+      } = req.body as {
+        name?: string;
+        email?: string;
+        role?: string;
+        profileImageUrl?: string;
+        title?: string;
+        phone?: string;
+      };
+
+      const user = await prisma.user.findUnique({
+        where: { id },
+      });
+
+      if (!user || user.orgId !== req.user.orgId) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const data: any = {};
+
+      if (name !== undefined) data.name = name.trim();
+      if (email !== undefined) data.email = email.trim().toLowerCase();
+      if (role !== undefined) {
+        if (role === "admin" || role === "care_manager") {
+          data.role = role;
+        }
+      }
+      if (profileImageUrl !== undefined)
+        data.profileImageUrl = profileImageUrl.trim() || null;
+      if (title !== undefined) data.title = title.trim() || null;
+      if (phone !== undefined) data.phone = phone.trim() || null;
+
+      try {
+        const updated = await prisma.user.update({
+          where: { id: user.id },
+          data,
+        });
+
+        return res.json({
+          id: updated.id,
+          name: updated.name,
+          email: updated.email,
+          role: updated.role,
+          profileImageUrl: updated.profileImageUrl,
+          title: updated.title,
+          phone: updated.phone,
+        });
+      } catch (err: any) {
+        if (err.code === "P2002") {
+          return res
+            .status(409)
+            .json({ error: "Another user already uses this email." });
+        }
+        throw err;
+      }
+    } catch (err) {
+      console.error("Error updating user:", err);
+      return res.status(500).json({ error: "Failed to update user." });
+    }
+  }
+);
+
+/**
  * POST /api/users/:id/assign-clients
  * Admin-only – assign clients to a care manager.
  * Body: { clientIds: string[] }
+ *
+ * Uses nullable primaryCMId so unchecking unassigns clients.
  */
 router.post(
   "/:id/assign-clients",
@@ -266,7 +349,7 @@ router.post(
 
       const orgId = req.user.orgId;
 
-      // 🔹 UNASSIGN this CM from any clients NOT in clientIds
+      // UNASSIGN this CM from any clients NOT in clientIds
       await prisma.client.updateMany({
         where: {
           orgId,
@@ -282,7 +365,7 @@ router.post(
         },
       });
 
-      // 🔹 ASSIGN this CM to all specified clients
+      // ASSIGN this CM to all specified clients
       if (clientIds.length > 0) {
         await prisma.client.updateMany({
           where: {
@@ -335,7 +418,7 @@ router.post(
 /**
  * DELETE /api/users/:id
  * Admin-only – delete a care manager.
- * Safety: prevent delete if they still own any clients.
+ * Safety: prevent delete if they still own clients.
  */
 router.delete(
   "/:id",
