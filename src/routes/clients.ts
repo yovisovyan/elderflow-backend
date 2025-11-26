@@ -3,20 +3,29 @@ import { PrismaClient } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth";
 import { requireAdmin } from "../middleware/requireAdmin";
 
-
 const router = Router();
 const prisma = new PrismaClient();
 
 /**
  * GET /api/clients
  * Returns list of clients for the logged-in organization.
+ * Care managers only see clients where they are the primary CM.
  */
 router.get("/", async (req: AuthRequest, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
+    const where: any = {
+      orgId: req.user.orgId,
+    };
+
+    // 🔹 Care managers only see their own clients
+    if (req.user.role === "care_manager") {
+      where.primaryCMId = req.user.userId;
+    }
+
     const clients = await prisma.client.findMany({
-      where: { orgId: req.user.orgId },
+      where,
       orderBy: { name: "asc" },
     });
 
@@ -33,6 +42,7 @@ router.get("/", async (req: AuthRequest, res) => {
  * - totalHoursBilled
  * - outstandingBalance
  * - lastInvoiceDate
+ * Care managers can only access their own clients.
  */
 router.get("/:id", async (req: AuthRequest, res) => {
   try {
@@ -49,6 +59,16 @@ router.get("/:id", async (req: AuthRequest, res) => {
 
     if (!client) {
       return res.status(404).json({ error: "Client not found" });
+    }
+
+    // 🔹 Care manager cannot access another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res
+        .status(403)
+        .json({ error: "You are not allowed to access this client." });
     }
 
     // Fetch invoices + payments to build a simple summary
@@ -198,7 +218,6 @@ router.patch("/:id", async (req: AuthRequest, res) => {
   }
 });
 
-
 /**
  * PUT /api/clients/:id
  * Updates client info + billing rules.
@@ -206,6 +225,10 @@ router.patch("/:id", async (req: AuthRequest, res) => {
 router.put("/:id", async (req: AuthRequest, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ error: "Only admin can update clients" });
+    }
 
     const { id } = req.params;
     const {
@@ -252,6 +275,7 @@ router.put("/:id", async (req: AuthRequest, res) => {
 /**
  * GET /api/clients/:id/notes
  * Returns notes for a client (most recent first)
+ * Care managers can only access notes for their own clients.
  */
 router.get("/:id/notes", async (req: AuthRequest, res) => {
   try {
@@ -271,6 +295,16 @@ router.get("/:id/notes", async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Client not found" });
     }
 
+    // 🔹 Care manager cannot access notes for another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res
+        .status(403)
+        .json({ error: "You are not allowed to access this client's notes." });
+    }
+
     const notes = await prisma.note.findMany({
       where: {
         clientId: id,
@@ -281,7 +315,6 @@ router.get("/:id/notes", async (req: AuthRequest, res) => {
       },
     });
 
-    // We no longer have an author relation; frontend can use authorId or show "You"
     return res.json(
       notes.map((n: any) => ({
         id: n.id,
@@ -296,10 +329,10 @@ router.get("/:id/notes", async (req: AuthRequest, res) => {
   }
 });
 
-
 /**
  * POST /api/clients/:id/notes
  * Body: { content: string }
+ * Care managers can only add notes for their own clients.
  */
 router.post("/:id/notes", async (req: AuthRequest, res) => {
   try {
@@ -312,7 +345,6 @@ router.post("/:id/notes", async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Note content is required" });
     }
 
-    // Ensure client exists & belongs to same org
     const client = await prisma.client.findFirst({
       where: {
         id,
@@ -324,11 +356,21 @@ router.post("/:id/notes", async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Client not found" });
     }
 
+    // 🔹 Care manager cannot add notes for another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res
+        .status(403)
+        .json({ error: "You are not allowed to add notes for this client." });
+    }
+
     const note = await prisma.note.create({
       data: {
         orgId: req.user.orgId,
         clientId: id,
-        authorId: req.user.userId, // same pattern as activities
+        authorId: req.user.userId,
         content: content.trim(),
       },
     });
@@ -343,6 +385,7 @@ router.post("/:id/notes", async (req: AuthRequest, res) => {
 /**
  * GET /api/clients/:id/billing-rules
  * Returns org-level and client-specific billing rules.
+ * Care managers can only access billing rules for their own clients.
  */
 router.get("/:id/billing-rules", async (req: AuthRequest, res) => {
   try {
@@ -363,12 +406,23 @@ router.get("/:id/billing-rules", async (req: AuthRequest, res) => {
         select: {
           id: true,
           billingRulesJson: true,
+          primaryCMId: true,
         },
       }),
     ]);
 
     if (!client) {
       return res.status(404).json({ error: "Client not found" });
+    }
+
+    // 🔹 Care manager cannot access billing rules for another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access this client's billing rules.",
+      });
     }
 
     const orgRules = (org?.billingRulesJson as any) || {};
@@ -390,7 +444,6 @@ router.get("/:id/billing-rules", async (req: AuthRequest, res) => {
 /**
  * POST /api/clients/:id/billing-rules
  * ADMIN ONLY – Save client-specific billing rules overrides.
- * Body: { rules: { hourlyRate?, minDuration?, rounding? } }
  */
 router.post(
   "/:id/billing-rules",
@@ -434,7 +487,5 @@ router.post(
     }
   }
 );
-
-
 
 export default router;
