@@ -160,7 +160,8 @@ router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
         Math.max(
           0,
           Math.round(
-            (activity.endTime.getTime() - activity.startTime.getTime()) / 60000
+            (activity.endTime.getTime() - activity.startTime.getTime()) /
+              60000
           )
         );
 
@@ -201,7 +202,6 @@ router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
         amount = round2(quantity * unitPrice);
       }
 
-      // Skip zero-amount lines just in case
       if (amount <= 0) continue;
 
       items.push({
@@ -271,6 +271,7 @@ router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
 /**
  * GET /api/invoices
  * Query: clientId? status?
+ * Care managers only see invoices for their own clients.
  */
 router.get("/", async (req: AuthRequest, res) => {
   try {
@@ -284,6 +285,11 @@ router.get("/", async (req: AuthRequest, res) => {
 
     if (clientId) where.clientId = clientId;
     if (status) where.status = status;
+
+    // 🔹 Care manager: only invoices for their clients
+    if (req.user.role === "care_manager") {
+      where.client = { primaryCMId: req.user.userId };
+    }
 
     const invoices = await prisma.invoice.findMany({
       where,
@@ -304,6 +310,7 @@ router.get("/", async (req: AuthRequest, res) => {
 
 /**
  * GET /api/invoices/export/csv
+ * Care managers only export invoices for their clients.
  */
 router.get("/export/csv", async (req: AuthRequest, res) => {
   try {
@@ -317,6 +324,11 @@ router.get("/export/csv", async (req: AuthRequest, res) => {
 
     if (status) where.status = status;
     if (clientId) where.clientId = clientId;
+
+    // 🔹 Care manager: only export invoices for their clients
+    if (req.user.role === "care_manager") {
+      where.client = { primaryCMId: req.user.userId };
+    }
 
     const invoices = await prisma.invoice.findMany({
       where,
@@ -444,6 +456,7 @@ startxref
 
 /**
  * GET /api/invoices/:id
+ * Care managers can only view invoices for their own clients.
  */
 router.get("/:id", async (req: AuthRequest, res) => {
   try {
@@ -462,6 +475,17 @@ router.get("/:id", async (req: AuthRequest, res) => {
 
     if (!invoice) {
       return res.status(404).json({ error: "Invoice not found" });
+    }
+
+    // 🔹 Care manager cannot see invoices for another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      invoice.client &&
+      (invoice.client as any).primaryCMId !== req.user.userId
+    ) {
+      return res
+        .status(403)
+        .json({ error: "You are not allowed to view this invoice." });
     }
 
     const paidAmount =
