@@ -266,7 +266,23 @@ router.post(
 
       const orgId = req.user.orgId;
 
-      // Assign this CM to all specified clients (overwrites any previous CM)
+      // 🔹 UNASSIGN this CM from any clients NOT in clientIds
+      await prisma.client.updateMany({
+        where: {
+          orgId,
+          primaryCMId: id,
+          NOT: {
+            id: {
+              in: clientIds,
+            },
+          },
+        },
+        data: {
+          primaryCMId: null,
+        },
+      });
+
+      // 🔹 ASSIGN this CM to all specified clients
       if (clientIds.length > 0) {
         await prisma.client.updateMany({
           where: {
