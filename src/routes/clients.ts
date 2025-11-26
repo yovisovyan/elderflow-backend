@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth";
+import { requireAdmin } from "../middleware/requireAdmin";
+
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -337,6 +339,102 @@ router.post("/:id/notes", async (req: AuthRequest, res) => {
     return res.status(500).json({ error: "Failed to create note" });
   }
 });
+
+/**
+ * GET /api/clients/:id/billing-rules
+ * Returns org-level and client-specific billing rules.
+ */
+router.get("/:id/billing-rules", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    const [org, client] = await Promise.all([
+      prisma.organization.findUnique({
+        where: { id: req.user.orgId },
+        select: { billingRulesJson: true },
+      }),
+      prisma.client.findFirst({
+        where: {
+          id,
+          orgId: req.user.orgId,
+        },
+        select: {
+          id: true,
+          billingRulesJson: true,
+        },
+      }),
+    ]);
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    const orgRules = (org?.billingRulesJson as any) || {};
+    const clientRules = (client.billingRulesJson as any) || {};
+
+    return res.json({
+      ok: true,
+      orgRules,
+      clientRules,
+    });
+  } catch (err) {
+    console.error("Error fetching client billing rules:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to fetch client billing rules." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/billing-rules
+ * ADMIN ONLY – Save client-specific billing rules overrides.
+ * Body: { rules: { hourlyRate?, minDuration?, rounding? } }
+ */
+router.post(
+  "/:id/billing-rules",
+  requireAdmin,
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { id } = req.params;
+      const { rules } = req.body as { rules?: any };
+
+      if (!rules || typeof rules !== "object") {
+        return res.status(400).json({ error: "Invalid rules JSON." });
+      }
+
+      const client = await prisma.client.findFirst({
+        where: {
+          id,
+          orgId: req.user.orgId,
+        },
+      });
+
+      if (!client) {
+        return res.status(404).json({ error: "Client not found" });
+      }
+
+      const updated = await prisma.client.update({
+        where: { id: client.id },
+        data: { billingRulesJson: rules },
+      });
+
+      return res.json({
+        ok: true,
+        clientRules: updated.billingRulesJson,
+      });
+    } catch (err) {
+      console.error("Error saving client billing rules:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to save client billing rules." });
+    }
+  }
+);
+
 
 
 export default router;
