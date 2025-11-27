@@ -27,18 +27,13 @@ function getBillingContext(
   rounding: "none" | "6m" | "15m";
 } {
   const hourlyRate =
-    Number(clientRules?.hourlyRate) ||
-    Number(orgRules?.hourlyRate) ||
-    150;
+    Number(clientRules?.hourlyRate) || Number(orgRules?.hourlyRate) || 150;
 
   const minDuration =
-    Number(clientRules?.minDuration) ||
-    Number(orgRules?.minDuration) ||
-    0;
+    Number(clientRules?.minDuration) || Number(orgRules?.minDuration) || 0;
 
   const rounding: "none" | "6m" | "15m" =
-    clientRules?.rounding === "6m" ||
-    clientRules?.rounding === "15m"
+    clientRules?.rounding === "6m" || clientRules?.rounding === "15m"
       ? clientRules.rounding
       : orgRules?.rounding === "6m" || orgRules?.rounding === "15m"
       ? orgRules.rounding
@@ -220,9 +215,7 @@ router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
       });
     }
 
-    const totalAmount = round2(
-      items.reduce((sum, i) => sum + i.amount, 0)
-    );
+    const totalAmount = round2(items.reduce((sum, i) => sum + i.amount, 0));
 
     // Create invoice
     const invoice = await prisma.invoice.create({
@@ -286,7 +279,7 @@ router.get("/", async (req: AuthRequest, res) => {
     if (clientId) where.clientId = clientId;
     if (status) where.status = status;
 
-    // 🔹 Care manager: only invoices for their clients
+    // Care manager: only invoices for their clients
     if (req.user.role === "care_manager") {
       where.client = { primaryCMId: req.user.userId };
     }
@@ -325,7 +318,7 @@ router.get("/export/csv", async (req: AuthRequest, res) => {
     if (status) where.status = status;
     if (clientId) where.clientId = clientId;
 
-    // 🔹 Care manager: only export invoices for their clients
+    // Care manager: only export invoices for their clients
     if (req.user.role === "care_manager") {
       where.client = { primaryCMId: req.user.userId };
     }
@@ -433,7 +426,6 @@ xref
 0000000128 00000 n 
 0000000173 00000 n 
 0000000236 00000 n 
-0000000343 00000 n 
 trailer<< /Root 3 0 R /Size 7>>
 startxref
 420
@@ -457,6 +449,14 @@ startxref
 /**
  * GET /api/invoices/:id
  * Care managers can only view invoices for their own clients.
+ * Includes:
+ * - items
+ * - payments (sorted by paidAt)
+ * - totalPaid
+ * - balance
+ * - paidAmount (alias for totalPaid)
+ * - balanceRemaining (alias for balance)
+ * - client.primaryCM (care manager)
  */
 router.get("/:id", async (req: AuthRequest, res) => {
   try {
@@ -468,8 +468,16 @@ router.get("/:id", async (req: AuthRequest, res) => {
       where: { id, orgId: req.user.orgId },
       include: {
         items: true,
-        payments: true,
-        client: true,
+        payments: {
+          orderBy: {
+            paidAt: "asc",
+          },
+        },
+        client: {
+          include: {
+            primaryCM: true,
+          },
+        },
       },
     });
 
@@ -477,7 +485,7 @@ router.get("/:id", async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Invoice not found" });
     }
 
-    // 🔹 Care manager cannot see invoices for another CM's client
+    // Care manager cannot see invoices for another CM's client
     if (
       req.user.role === "care_manager" &&
       invoice.client &&
@@ -488,16 +496,41 @@ router.get("/:id", async (req: AuthRequest, res) => {
         .json({ error: "You are not allowed to view this invoice." });
     }
 
-    const paidAmount =
-      invoice.payments?.reduce((sum, p) => sum + (p.amount || 0), 0) ?? 0;
+    const completedPayments = (invoice.payments ?? []).filter(
+      (p) => p.status === "completed"
+    );
 
-    const balanceRemaining = (invoice.totalAmount || 0) - paidAmount;
+    const totalPaid = completedPayments.reduce(
+      (sum, p) => sum + (p.amount || 0),
+      0
+    );
+
+    const balance = (invoice.totalAmount || 0) - totalPaid;
 
     return res.json({
-      ...invoice,
+      id: invoice.id,
+      orgId: invoice.orgId,
+      clientId: invoice.clientId,
+      client: invoice.client,
+      periodStart: invoice.periodStart,
+      periodEnd: invoice.periodEnd,
+      status: invoice.status,
+      totalAmount: invoice.totalAmount,
+      currency: invoice.currency,
+      pdfUrl: invoice.pdfUrl,
+      sentAt: invoice.sentAt,
+      paidAt: invoice.paidAt,
+      createdAt: invoice.createdAt,
+      updatedAt: invoice.updatedAt,
+
+      items: invoice.items,
       payments: invoice.payments,
-      paidAmount,
-      balanceRemaining,
+
+      totalPaid,
+      balance,
+
+      paidAmount: totalPaid,
+      balanceRemaining: balance,
     });
   } catch (err) {
     console.error("Error fetching invoice:", err);
@@ -509,136 +542,128 @@ router.get("/:id", async (req: AuthRequest, res) => {
  * POST /api/invoices/:id/approve
  * ADMIN ONLY – mark invoice as "sent"
  */
-router.post(
-  "/:id/approve",
-  requireAdmin,
-  async (req: AuthRequest, res) => {
-    try {
-      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+router.post("/:id/approve", requireAdmin, async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-      const { id } = req.params;
+    const { id } = req.params;
 
-      const invoice = await prisma.invoice.findFirst({
-        where: {
-          id,
-          orgId: req.user.orgId,
-        },
-      });
+    const invoice = await prisma.invoice.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
 
-      if (!invoice) {
-        return res.status(404).json({ error: "Invoice not found" });
-      }
-
-      const updated = await prisma.invoice.update({
-        where: { id: invoice.id },
-        data: {
-          status: "sent",
-          sentAt: new Date(),
-        },
-      });
-
-      res.json(updated);
-    } catch (err) {
-      console.error("Error approving invoice:", err);
-      res.status(500).json({ error: "Failed to approve invoice" });
+    if (!invoice) {
+      return res.status(404).json({ error: "Invoice not found" });
     }
+
+    const updated = await prisma.invoice.update({
+      where: { id: invoice.id },
+      data: {
+        status: "sent",
+        sentAt: new Date(),
+      },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error("Error approving invoice:", err);
+    res.status(500).json({ error: "Failed to approve invoice" });
   }
-);
+});
 
 /**
  * POST /api/invoices/:id/mark-paid
  * ADMIN ONLY
  */
-router.post(
-  "/:id/mark-paid",
-  requireAdmin,
-  async (req: AuthRequest, res) => {
-    try {
-      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+router.post("/:id/mark-paid", requireAdmin, async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-      const { id } = req.params;
-      const { amount, method, reference } = req.body as {
-        amount?: number;
-        method?: string;
-        reference?: string;
-      };
+    const { id } = req.params;
+    const { amount, method, reference } = req.body as {
+      amount?: number;
+      method?: string;
+      reference?: string;
+    };
 
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ error: "Invalid payment amount" });
-      }
-      if (!method || typeof method !== "string") {
-        return res.status(400).json({ error: "Payment method required" });
-      }
-
-      const invoice = await prisma.invoice.findFirst({
-        where: {
-          id,
-          orgId: req.user.orgId,
-        },
-        include: {
-          payments: true,
-        },
-      });
-
-      if (!invoice) {
-        return res.status(404).json({ error: "Invoice not found" });
-      }
-
-      const payment = await prisma.payment.create({
-        data: {
-          orgId: req.user.orgId,
-          invoiceId: invoice.id,
-          status: "completed",
-          amount,
-          method,
-          reference: reference || null,
-          paidAt: new Date(),
-        },
-      });
-
-      const allPayments = [...(invoice.payments ?? []), payment].filter(
-        (p) => p.status === "completed"
-      );
-      const totalPaid = allPayments.reduce(
-        (sum, p) => sum + (p.amount || 0),
-        0
-      );
-
-      const remaining = (invoice.totalAmount || 0) - totalPaid;
-
-      let updatedStatus: InvoiceStatus = invoice.status;
-      let paidAt = invoice.paidAt;
-
-      if (remaining <= 0) {
-        updatedStatus = "paid";
-        if (!paidAt) {
-          paidAt = new Date();
-        }
-      }
-
-      const updatedInvoice = await prisma.invoice.update({
-        where: { id: invoice.id },
-        data: {
-          status: updatedStatus,
-          paidAt,
-        },
-        include: {
-          items: true,
-          payments: true,
-          client: true,
-        },
-      });
-
-      res.json({
-        invoice: updatedInvoice,
-        balanceRemaining: remaining > 0 ? remaining : 0,
-      });
-    } catch (err) {
-      console.error("Error marking invoice as paid:", err);
-      res.status(500).json({ error: "Failed to mark invoice as paid" });
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "Invalid payment amount" });
     }
+    if (!method || typeof method !== "string") {
+      return res.status(400).json({ error: "Payment method required" });
+    }
+
+    const invoice = await prisma.invoice.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+      include: {
+        payments: true,
+      },
+    });
+
+    if (!invoice) {
+      return res.status(404).json({ error: "Invoice not found" });
+    }
+
+    const payment = await prisma.payment.create({
+      data: {
+        orgId: req.user.orgId,
+        invoiceId: invoice.id,
+        status: "completed",
+        amount,
+        method,
+        reference: reference || null,
+        paidAt: new Date(),
+      },
+    });
+
+    const allPayments = [...(invoice.payments ?? []), payment].filter(
+      (p) => p.status === "completed"
+    );
+    const totalPaid = allPayments.reduce(
+      (sum, p) => sum + (p.amount || 0),
+      0
+    );
+
+    const remaining = (invoice.totalAmount || 0) - totalPaid;
+
+    let updatedStatus: InvoiceStatus = invoice.status;
+    let paidAt = invoice.paidAt;
+
+    if (remaining <= 0) {
+      updatedStatus = "paid";
+      if (!paidAt) {
+        paidAt = new Date();
+      }
+    }
+
+    const updatedInvoice = await prisma.invoice.update({
+      where: { id: invoice.id },
+      data: {
+        status: updatedStatus,
+        paidAt,
+      },
+      include: {
+        items: true,
+        payments: true,
+        client: true,
+      },
+    });
+
+    res.json({
+      invoice: updatedInvoice,
+      balanceRemaining: remaining > 0 ? remaining : 0,
+    });
+  } catch (err) {
+    console.error("Error marking invoice as paid", err);
+    res.status(500).json({ error: "Failed to mark invoice as paid" });
   }
-);
+});
 
 /**
  * PATCH /api/invoices/:id
