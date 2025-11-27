@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const client_1 = require("@prisma/client");
+const cmNotesController_1 = require("../controllers/cmNotesController");
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
 /**
@@ -133,5 +134,14 @@ router.get("/summary", async (req, res) => {
         console.error("Error fetching CM summary:", err);
         return res.status(500).json({ error: "Failed to fetch CM summary." });
     }
+});
+// Quick notes for care manager dashboard
+// GET /api/cm/notes?limit=5
+router.get("/notes", (req, res) => {
+    return (0, cmNotesController_1.getCmNotes)(req, res);
+});
+// POST /api/cm/notes
+router.post("/notes", (req, res) => {
+    return (0, cmNotesController_1.createCmNote)(req, res);
 });
 exports.default = router;

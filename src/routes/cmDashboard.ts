@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth";
+import { getCmNotes, createCmNote } from "../controllers/cmNotesController";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -147,5 +148,19 @@ router.get("/summary", async (req: AuthRequest, res) => {
     return res.status(500).json({ error: "Failed to fetch CM summary." });
   }
 });
+
+// Quick notes for care manager dashboard
+
+// GET /api/cm/notes?limit=5
+router.get("/notes", (req, res) => {
+  return getCmNotes(req as AuthRequest, res);
+});
+
+// POST /api/cm/notes
+router.post("/notes", (req, res) => {
+  return createCmNote(req as AuthRequest, res);
+});
+
+
 
 export default router;

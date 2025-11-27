@@ -317,10 +317,21 @@ router.get("/:id/notes", async (req: AuthRequest, res) => {
         .json({ error: "You are not allowed to access this client's notes." });
     }
 
-    const notes = await prisma.note.findMany({
+    const notes = await prisma.clientNote.findMany({
       where: {
         clientId: id,
-        orgId: req.user.orgId,
+        client: {
+          orgId: req.user.orgId,
+        },
+      },
+      include: {
+        author: {
+          select: {
+            id: true,
+            name: true,
+            role: true,
+          },
+        },
       },
       orderBy: {
         createdAt: "desc",
@@ -328,18 +339,20 @@ router.get("/:id/notes", async (req: AuthRequest, res) => {
     });
 
     return res.json(
-      notes.map((n: any) => ({
+      notes.map((n) => ({
         id: n.id,
         content: n.content,
         createdAt: n.createdAt,
         authorId: n.authorId,
+        authorName: n.author?.name ?? null,
       }))
     );
   } catch (err) {
-    console.error("Error fetching notes", err);
-    return res.status(500).json({ error: "Failed to fetch notes" });
+    console.error("Error fetching client notes:", err);
+    return res.status(500).json({ error: "Failed to load notes." });
   }
 });
+
 
 /**
  * POST /api/clients/:id/notes
