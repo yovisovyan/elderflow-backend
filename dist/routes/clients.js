@@ -253,25 +253,40 @@ router.get("/:id/notes", async (req, res) => {
                 .status(403)
                 .json({ error: "You are not allowed to access this client's notes." });
         }
-        const notes = await prisma.note.findMany({
+        const notes = await prisma.clientNote.findMany({
             where: {
                 clientId: id,
-                orgId: req.user.orgId,
+                client: {
+                    orgId: req.user.orgId,
+                },
+            },
+            include: {
+                author: {
+                    select: {
+                        id: true,
+                        name: true,
+                        role: true,
+                    },
+                },
             },
             orderBy: {
                 createdAt: "desc",
             },
         });
-        return res.json(notes.map((n) => ({
-            id: n.id,
-            content: n.content,
-            createdAt: n.createdAt,
-            authorId: n.authorId,
-        })));
+        return res.json(notes.map((n) => {
+            var _a, _b;
+            return ({
+                id: n.id,
+                content: n.content,
+                createdAt: n.createdAt,
+                authorId: n.authorId,
+                authorName: (_b = (_a = n.author) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : null,
+            });
+        }));
     }
     catch (err) {
-        console.error("Error fetching notes", err);
-        return res.status(500).json({ error: "Failed to fetch notes" });
+        console.error("Error fetching client notes:", err);
+        return res.status(500).json({ error: "Failed to load notes." });
     }
 });
 /**
@@ -304,19 +319,71 @@ router.post("/:id/notes", async (req, res) => {
                 .status(403)
                 .json({ error: "You are not allowed to add notes for this client." });
         }
-        const note = await prisma.note.create({
+        const note = await prisma.clientNote.create({
             data: {
-                orgId: req.user.orgId,
                 clientId: id,
                 authorId: req.user.userId,
                 content: content.trim(),
             },
         });
-        return res.status(201).json(note);
+        return res.status(201).json({
+            id: note.id,
+            content: note.content,
+            createdAt: note.createdAt,
+            authorId: note.authorId,
+        });
     }
     catch (err) {
         console.error("Error creating note", err);
         return res.status(500).json({ error: "Failed to create note" });
+    }
+});
+/**
+ * DELETE /api/clients/:clientId/notes/:noteId
+ * Admins can delete any note in their org.
+ * Care managers can delete notes they authored OR for clients where they are primary CM.
+ */
+router.delete("/:clientId/notes/:noteId", async (req, res) => {
+    var _a;
+    try {
+        if (!req.user)
+            return res.status(401).json({ error: "Unauthorized" });
+        const { clientId, noteId } = req.params;
+        const note = await prisma.clientNote.findFirst({
+            where: {
+                id: noteId,
+                clientId,
+                client: {
+                    orgId: req.user.orgId,
+                },
+            },
+            include: {
+                client: {
+                    select: {
+                        primaryCMId: true,
+                    },
+                },
+            },
+        });
+        if (!note) {
+            return res.status(404).json({ error: "Note not found" });
+        }
+        const isAdmin = req.user.role === "admin";
+        const isAuthor = note.authorId === req.user.userId;
+        const isPrimaryCM = ((_a = note.client) === null || _a === void 0 ? void 0 : _a.primaryCMId) === req.user.userId;
+        if (!isAdmin && !isAuthor && !isPrimaryCM) {
+            return res
+                .status(403)
+                .json({ error: "You are not allowed to delete this note." });
+        }
+        await prisma.clientNote.delete({
+            where: { id: note.id },
+        });
+        return res.status(204).send();
+    }
+    catch (err) {
+        console.error("Error deleting note", err);
+        return res.status(500).json({ error: "Failed to delete note" });
     }
 });
 /**

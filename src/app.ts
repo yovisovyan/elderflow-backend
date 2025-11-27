@@ -17,6 +17,7 @@ import billingRulesRoutes from "./routes/billingRules";
 import stripeRouter, { stripeWebhookHandler } from "./routes/stripe";
 import serviceTypesRoutes from "./routes/serviceTypes";
 import cmDashboardRoutes from "./routes/cmDashboard";
+import { errorHandler } from "./middleware/errorHandler";
 
 
 
@@ -60,6 +61,7 @@ app.use("/api/dashboard", authMiddleware, dashboardRoutes);
 app.use("/api/reports", authMiddleware, reportsRoutes);
 app.use("/api/service-types", authMiddleware, serviceTypesRoutes);
 app.use("/api/cm", authMiddleware, cmDashboardRoutes);
+app.use(errorHandler);
 
 
 

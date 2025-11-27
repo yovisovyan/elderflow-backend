@@ -1,12 +1,33 @@
 import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
+import { z } from "zod";
 import { AuthRequest } from "../middleware/auth";
 import { requireAdmin } from "../middleware/requireAdmin";
+import { validate } from "../middleware/validate";
 
 const router = Router();
 const prisma = new PrismaClient();
 
 type InvoiceStatus = "draft" | "sent" | "paid" | "overdue" | string;
+
+const generateInvoiceSchema = z.object({
+  clientId: z.string().min(1, "clientId is required"),
+  periodStart: z.string().min(1, "periodStart is required"),
+  periodEnd: z.string().min(1, "periodEnd is required"),
+});
+
+const markPaidParamsSchema = z.object({
+  id: z.string().min(1, "Invoice id is required"),
+});
+
+const markPaidBodySchema = z.object({
+  amount: z.number().positive("Payment amount must be > 0"),
+  method: z
+    .string()
+    .min(1, "Payment method is required")
+    .max(100, "Method too long"),
+  reference: z.string().max(255).optional(),
+});
 
 /**
  * Helper: round to 2 decimal places
@@ -70,196 +91,201 @@ function adjustMinutes(
  * Creates a draft invoice from billable activities for a given client + date range.
  * ADMIN ONLY
  */
-router.post("/generate", requireAdmin, async (req: AuthRequest, res) => {
-  try {
-    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+router.post(
+  "/generate",
+  requireAdmin,
+  validate(generateInvoiceSchema),
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-    const { clientId, periodStart, periodEnd } = req.body;
+      const { clientId, periodStart, periodEnd } = req.body as {
+        clientId: string;
+        periodStart: string;
+        periodEnd: string;
+      };
 
-    if (!clientId || !periodStart || !periodEnd) {
-      return res
-        .status(400)
-        .json({ error: "clientId, periodStart, periodEnd are required" });
-    }
+      // At this point, Zod has already enforced required fields.
 
-    // Load organization & client with rules
-    const [org, client] = await Promise.all([
-      prisma.organization.findUnique({
-        where: { id: req.user.orgId },
-        select: { billingRulesJson: true },
-      }),
-      prisma.client.findFirst({
+      // Load organization & client with rules
+      const [org, client] = await Promise.all([
+        prisma.organization.findUnique({
+          where: { id: req.user.orgId },
+          select: { billingRulesJson: true },
+        }),
+        prisma.client.findFirst({
+          where: {
+            id: clientId,
+            orgId: req.user.orgId,
+          },
+          select: {
+            id: true,
+            orgId: true,
+            billingRulesJson: true,
+          },
+        }),
+      ]);
+
+      if (!client) {
+        return res.status(404).json({ error: "Client not found" });
+      }
+
+      const orgRules = (org?.billingRulesJson as any) || {};
+      const clientRules = (client.billingRulesJson as any) || {};
+
+      const { hourlyRate, minDuration, rounding } = getBillingContext(
+        clientRules,
+        orgRules
+      );
+
+      const start = new Date(periodStart);
+      const end = new Date(periodEnd);
+
+      // Get billable activities in range, including service type
+      const activities = await prisma.activity.findMany({
         where: {
-          id: clientId,
           orgId: req.user.orgId,
+          clientId: client.id,
+          isBillable: true,
+          startTime: {
+            gte: start,
+          },
+          endTime: {
+            lte: end,
+          },
         },
-        select: {
-          id: true,
-          orgId: true,
-          billingRulesJson: true,
+        include: {
+          serviceType: true,
         },
-      }),
-    ]);
+      });
 
-    if (!client) {
-      return res.status(404).json({ error: "Client not found" });
-    }
+      if (!activities.length) {
+        return res
+          .status(400)
+          .json({ error: "No billable activities found for this period" });
+      }
 
-    const orgRules = (org?.billingRulesJson as any) || {};
-    const clientRules = (client.billingRulesJson as any) || {};
+      // Build invoice items
+      const items: {
+        activityId: string | null;
+        description: string;
+        quantity: number;
+        unitPrice: number;
+        amount: number;
+      }[] = [];
 
-    const { hourlyRate, minDuration, rounding } = getBillingContext(
-      clientRules,
-      orgRules
-    );
+      for (const activity of activities) {
+        const durationMinutes =
+          activity.duration ||
+          Math.max(
+            0,
+            Math.round(
+              (activity.endTime.getTime() - activity.startTime.getTime()) /
+                60000
+            )
+          );
 
-    const start = new Date(periodStart);
-    const end = new Date(periodEnd);
+        const svc = activity.serviceType;
 
-    // Get billable activities in range, including service type
-    const activities = await prisma.activity.findMany({
-      where: {
-        orgId: req.user.orgId,
-        clientId: client.id,
-        isBillable: true,
-        startTime: {
-          gte: start,
-        },
-        endTime: {
-          lte: end,
-        },
-      },
-      include: {
-        serviceType: true,
-      },
-    });
+        let description = "Care Management Services";
+        let quantity = 0;
+        let unitPrice = 0;
+        let amount = 0;
 
-    if (!activities.length) {
-      return res
-        .status(400)
-        .json({ error: "No billable activities found for this period" });
-    }
+        if (svc) {
+          description = svc.name;
+          unitPrice = svc.rateAmount || 0;
 
-    // Build invoice items
-    const items: {
-      activityId: string | null;
-      description: string;
-      quantity: number;
-      unitPrice: number;
-      amount: number;
-    }[] = [];
-
-    for (const activity of activities) {
-      const durationMinutes =
-        activity.duration ||
-        Math.max(
-          0,
-          Math.round(
-            (activity.endTime.getTime() - activity.startTime.getTime()) /
-              60000
-          )
-        );
-
-      const svc = activity.serviceType;
-
-      let description = "Care Management Services";
-      let quantity = 0;
-      let unitPrice = 0;
-      let amount = 0;
-
-      if (svc) {
-        description = svc.name;
-        unitPrice = svc.rateAmount || 0;
-
-        if (svc.rateType === "flat") {
-          // Flat = one unit at the flat rate
-          quantity = 1;
-          amount = round2(unitPrice);
+          if (svc.rateType === "flat") {
+            // Flat = one unit at the flat rate
+            quantity = 1;
+            amount = round2(unitPrice);
+          } else {
+            // Hourly service type
+            const adjustedMinutes = adjustMinutes(
+              durationMinutes,
+              minDuration,
+              rounding
+            );
+            quantity = adjustedMinutes / 60;
+            amount = round2(quantity * unitPrice);
+          }
         } else {
-          // Hourly service type
+          // Fallback: no service type, use hourlyRate from rules
           const adjustedMinutes = adjustMinutes(
             durationMinutes,
             minDuration,
             rounding
           );
           quantity = adjustedMinutes / 60;
+          unitPrice = hourlyRate;
           amount = round2(quantity * unitPrice);
         }
-      } else {
-        // Fallback: no service type, use hourlyRate from rules
-        const adjustedMinutes = adjustMinutes(
-          durationMinutes,
-          minDuration,
-          rounding
-        );
-        quantity = adjustedMinutes / 60;
-        unitPrice = hourlyRate;
-        amount = round2(quantity * unitPrice);
+
+        if (amount <= 0) continue;
+
+        items.push({
+          activityId: activity.id,
+          description,
+          quantity,
+          unitPrice,
+          amount,
+        });
       }
 
-      if (amount <= 0) continue;
+      if (!items.length) {
+        return res.status(400).json({
+          error:
+            "No billable activities produced any invoiceable amounts with the current rules.",
+        });
+      }
 
-      items.push({
-        activityId: activity.id,
-        description,
-        quantity,
-        unitPrice,
-        amount,
+      const totalAmount = round2(items.reduce((sum, i) => sum + i.amount, 0));
+
+      // Create invoice
+      const invoice = await prisma.invoice.create({
+        data: {
+          orgId: req.user.orgId,
+          clientId: client.id,
+          periodStart: start,
+          periodEnd: end,
+          status: "draft",
+          totalAmount,
+          currency: "USD",
+        },
       });
-    }
 
-    if (!items.length) {
-      return res.status(400).json({
-        error:
-          "No billable activities produced any invoiceable amounts with the current rules.",
+      // Create invoice items
+      await Promise.all(
+        items.map((item) =>
+          prisma.invoiceItem.create({
+            data: {
+              invoiceId: invoice.id,
+              activityId: item.activityId,
+              description: item.description,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+              amount: item.amount,
+            },
+          })
+        )
+      );
+
+      const fullInvoice = await prisma.invoice.findUnique({
+        where: { id: invoice.id },
+        include: {
+          items: true,
+          client: true,
+        },
       });
+
+      res.status(201).json(fullInvoice);
+    } catch (err) {
+      console.error("Error generating invoice:", err);
+      res.status(500).json({ error: "Failed to generate invoice" });
     }
-
-    const totalAmount = round2(items.reduce((sum, i) => sum + i.amount, 0));
-
-    // Create invoice
-    const invoice = await prisma.invoice.create({
-      data: {
-        orgId: req.user.orgId,
-        clientId: client.id,
-        periodStart: start,
-        periodEnd: end,
-        status: "draft",
-        totalAmount,
-        currency: "USD",
-      },
-    });
-
-    // Create invoice items
-    await Promise.all(
-      items.map((item) =>
-        prisma.invoiceItem.create({
-          data: {
-            invoiceId: invoice.id,
-            activityId: item.activityId,
-            description: item.description,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-            amount: item.amount,
-          },
-        })
-      )
-    );
-
-    const fullInvoice = await prisma.invoice.findUnique({
-      where: { id: invoice.id },
-      include: {
-        items: true,
-        client: true,
-      },
-    });
-
-    res.status(201).json(fullInvoice);
-  } catch (err) {
-    console.error("Error generating invoice:", err);
-    res.status(500).json({ error: "Failed to generate invoice" });
   }
-});
+);
 
 /**
  * GET /api/invoices
@@ -578,92 +604,93 @@ router.post("/:id/approve", requireAdmin, async (req: AuthRequest, res) => {
  * POST /api/invoices/:id/mark-paid
  * ADMIN ONLY
  */
-router.post("/:id/mark-paid", requireAdmin, async (req: AuthRequest, res) => {
-  try {
-    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+router.post(
+  "/:id/mark-paid",
+  requireAdmin,
+  validate(markPaidParamsSchema, "params"),
+  validate(markPaidBodySchema),
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-    const { id } = req.params;
-    const { amount, method, reference } = req.body as {
-      amount?: number;
-      method?: string;
-      reference?: string;
-    };
+      const { id } = req.params as { id: string };
+      const { amount, method, reference } = req.body as {
+        amount: number;
+        method: string;
+        reference?: string;
+      };
 
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ error: "Invalid payment amount" });
-    }
-    if (!method || typeof method !== "string") {
-      return res.status(400).json({ error: "Payment method required" });
-    }
+      // Zod has already validated amount, method, reference.
 
-    const invoice = await prisma.invoice.findFirst({
-      where: {
-        id,
-        orgId: req.user.orgId,
-      },
-      include: {
-        payments: true,
-      },
-    });
+      const invoice = await prisma.invoice.findFirst({
+        where: {
+          id,
+          orgId: req.user.orgId,
+        },
+        include: {
+          payments: true,
+        },
+      });
 
-    if (!invoice) {
-      return res.status(404).json({ error: "Invoice not found" });
-    }
-
-    const payment = await prisma.payment.create({
-      data: {
-        orgId: req.user.orgId,
-        invoiceId: invoice.id,
-        status: "completed",
-        amount,
-        method,
-        reference: reference || null,
-        paidAt: new Date(),
-      },
-    });
-
-    const allPayments = [...(invoice.payments ?? []), payment].filter(
-      (p) => p.status === "completed"
-    );
-    const totalPaid = allPayments.reduce(
-      (sum, p) => sum + (p.amount || 0),
-      0
-    );
-
-    const remaining = (invoice.totalAmount || 0) - totalPaid;
-
-    let updatedStatus: InvoiceStatus = invoice.status;
-    let paidAt = invoice.paidAt;
-
-    if (remaining <= 0) {
-      updatedStatus = "paid";
-      if (!paidAt) {
-        paidAt = new Date();
+      if (!invoice) {
+        return res.status(404).json({ error: "Invoice not found" });
       }
+
+      const payment = await prisma.payment.create({
+        data: {
+          orgId: req.user.orgId,
+          invoiceId: invoice.id,
+          status: "completed",
+          amount,
+          method,
+          reference: reference || null,
+          paidAt: new Date(),
+        },
+      });
+
+      const allPayments = [...(invoice.payments ?? []), payment].filter(
+        (p) => p.status === "completed"
+      );
+      const totalPaid = allPayments.reduce(
+        (sum, p) => sum + (p.amount || 0),
+        0
+      );
+
+      const remaining = (invoice.totalAmount || 0) - totalPaid;
+
+      let updatedStatus: InvoiceStatus = invoice.status;
+      let paidAt = invoice.paidAt;
+
+      if (remaining <= 0) {
+        updatedStatus = "paid";
+        if (!paidAt) {
+          paidAt = new Date();
+        }
+      }
+
+      const updatedInvoice = await prisma.invoice.update({
+        where: { id: invoice.id },
+        data: {
+          status: updatedStatus,
+          paidAt,
+        },
+        include: {
+          items: true,
+          payments: true,
+          client: true,
+        },
+      });
+
+      res.json({
+        invoice: updatedInvoice,
+        balanceRemaining: remaining > 0 ? remaining : 0,
+      });
+    } catch (err) {
+      console.error("Error marking invoice as paid", err);
+      res.status(500).json({ error: "Failed to mark invoice as paid" });
     }
-
-    const updatedInvoice = await prisma.invoice.update({
-      where: { id: invoice.id },
-      data: {
-        status: updatedStatus,
-        paidAt,
-      },
-      include: {
-        items: true,
-        payments: true,
-        client: true,
-      },
-    });
-
-    res.json({
-      invoice: updatedInvoice,
-      balanceRemaining: remaining > 0 ? remaining : 0,
-    });
-  } catch (err) {
-    console.error("Error marking invoice as paid", err);
-    res.status(500).json({ error: "Failed to mark invoice as paid" });
   }
-});
+);
 
 /**
  * PATCH /api/invoices/:id

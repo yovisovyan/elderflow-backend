@@ -2,9 +2,27 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const client_1 = require("@prisma/client");
+const zod_1 = require("zod");
 const requireAdmin_1 = require("../middleware/requireAdmin");
+const validate_1 = require("../middleware/validate");
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
+const generateInvoiceSchema = zod_1.z.object({
+    clientId: zod_1.z.string().min(1, "clientId is required"),
+    periodStart: zod_1.z.string().min(1, "periodStart is required"),
+    periodEnd: zod_1.z.string().min(1, "periodEnd is required"),
+});
+const markPaidParamsSchema = zod_1.z.object({
+    id: zod_1.z.string().min(1, "Invoice id is required"),
+});
+const markPaidBodySchema = zod_1.z.object({
+    amount: zod_1.z.number().positive("Payment amount must be > 0"),
+    method: zod_1.z
+        .string()
+        .min(1, "Payment method is required")
+        .max(100, "Method too long"),
+    reference: zod_1.z.string().max(255).optional(),
+});
 /**
  * Helper: round to 2 decimal places
  */
@@ -15,14 +33,9 @@ function round2(n) {
  * Helper: get billing rule values from client/org rules
  */
 function getBillingContext(clientRules, orgRules) {
-    const hourlyRate = Number(clientRules === null || clientRules === void 0 ? void 0 : clientRules.hourlyRate) ||
-        Number(orgRules === null || orgRules === void 0 ? void 0 : orgRules.hourlyRate) ||
-        150;
-    const minDuration = Number(clientRules === null || clientRules === void 0 ? void 0 : clientRules.minDuration) ||
-        Number(orgRules === null || orgRules === void 0 ? void 0 : orgRules.minDuration) ||
-        0;
-    const rounding = (clientRules === null || clientRules === void 0 ? void 0 : clientRules.rounding) === "6m" ||
-        (clientRules === null || clientRules === void 0 ? void 0 : clientRules.rounding) === "15m"
+    const hourlyRate = Number(clientRules === null || clientRules === void 0 ? void 0 : clientRules.hourlyRate) || Number(orgRules === null || orgRules === void 0 ? void 0 : orgRules.hourlyRate) || 150;
+    const minDuration = Number(clientRules === null || clientRules === void 0 ? void 0 : clientRules.minDuration) || Number(orgRules === null || orgRules === void 0 ? void 0 : orgRules.minDuration) || 0;
+    const rounding = (clientRules === null || clientRules === void 0 ? void 0 : clientRules.rounding) === "6m" || (clientRules === null || clientRules === void 0 ? void 0 : clientRules.rounding) === "15m"
         ? clientRules.rounding
         : (orgRules === null || orgRules === void 0 ? void 0 : orgRules.rounding) === "6m" || (orgRules === null || orgRules === void 0 ? void 0 : orgRules.rounding) === "15m"
             ? orgRules.rounding
@@ -51,16 +64,12 @@ function adjustMinutes(minutes, minDuration, rounding) {
  * Creates a draft invoice from billable activities for a given client + date range.
  * ADMIN ONLY
  */
-router.post("/generate", requireAdmin_1.requireAdmin, async (req, res) => {
+router.post("/generate", requireAdmin_1.requireAdmin, (0, validate_1.validate)(generateInvoiceSchema), async (req, res) => {
     try {
         if (!req.user)
             return res.status(401).json({ error: "Unauthorized" });
         const { clientId, periodStart, periodEnd } = req.body;
-        if (!clientId || !periodStart || !periodEnd) {
-            return res
-                .status(400)
-                .json({ error: "clientId, periodStart, periodEnd are required" });
-        }
+        // At this point, Zod has already enforced required fields.
         // Load organization & client with rules
         const [org, client] = await Promise.all([
             prisma.organization.findUnique({
@@ -212,7 +221,7 @@ router.get("/", async (req, res) => {
             where.clientId = clientId;
         if (status)
             where.status = status;
-        // 🔹 Care manager: only invoices for their clients
+        // Care manager: only invoices for their clients
         if (req.user.role === "care_manager") {
             where.client = { primaryCMId: req.user.userId };
         }
@@ -248,7 +257,7 @@ router.get("/export/csv", async (req, res) => {
             where.status = status;
         if (clientId)
             where.clientId = clientId;
-        // 🔹 Care manager: only export invoices for their clients
+        // Care manager: only export invoices for their clients
         if (req.user.role === "care_manager") {
             where.client = { primaryCMId: req.user.userId };
         }
@@ -343,7 +352,6 @@ xref
 0000000128 00000 n 
 0000000173 00000 n 
 0000000236 00000 n 
-0000000343 00000 n 
 trailer<< /Root 3 0 R /Size 7>>
 startxref
 420
@@ -360,9 +368,17 @@ startxref
 /**
  * GET /api/invoices/:id
  * Care managers can only view invoices for their own clients.
+ * Includes:
+ * - items
+ * - payments (sorted by paidAt)
+ * - totalPaid
+ * - balance
+ * - paidAmount (alias for totalPaid)
+ * - balanceRemaining (alias for balance)
+ * - client.primaryCM (care manager)
  */
 router.get("/:id", async (req, res) => {
-    var _a, _b;
+    var _a;
     try {
         if (!req.user)
             return res.status(401).json({ error: "Unauthorized" });
@@ -371,14 +387,22 @@ router.get("/:id", async (req, res) => {
             where: { id, orgId: req.user.orgId },
             include: {
                 items: true,
-                payments: true,
-                client: true,
+                payments: {
+                    orderBy: {
+                        paidAt: "asc",
+                    },
+                },
+                client: {
+                    include: {
+                        primaryCM: true,
+                    },
+                },
             },
         });
         if (!invoice) {
             return res.status(404).json({ error: "Invoice not found" });
         }
-        // 🔹 Care manager cannot see invoices for another CM's client
+        // Care manager cannot see invoices for another CM's client
         if (req.user.role === "care_manager" &&
             invoice.client &&
             invoice.client.primaryCMId !== req.user.userId) {
@@ -386,13 +410,30 @@ router.get("/:id", async (req, res) => {
                 .status(403)
                 .json({ error: "You are not allowed to view this invoice." });
         }
-        const paidAmount = (_b = (_a = invoice.payments) === null || _a === void 0 ? void 0 : _a.reduce((sum, p) => sum + (p.amount || 0), 0)) !== null && _b !== void 0 ? _b : 0;
-        const balanceRemaining = (invoice.totalAmount || 0) - paidAmount;
+        const completedPayments = ((_a = invoice.payments) !== null && _a !== void 0 ? _a : []).filter((p) => p.status === "completed");
+        const totalPaid = completedPayments.reduce((sum, p) => sum + (p.amount || 0), 0);
+        const balance = (invoice.totalAmount || 0) - totalPaid;
         return res.json({
-            ...invoice,
+            id: invoice.id,
+            orgId: invoice.orgId,
+            clientId: invoice.clientId,
+            client: invoice.client,
+            periodStart: invoice.periodStart,
+            periodEnd: invoice.periodEnd,
+            status: invoice.status,
+            totalAmount: invoice.totalAmount,
+            currency: invoice.currency,
+            pdfUrl: invoice.pdfUrl,
+            sentAt: invoice.sentAt,
+            paidAt: invoice.paidAt,
+            createdAt: invoice.createdAt,
+            updatedAt: invoice.updatedAt,
+            items: invoice.items,
             payments: invoice.payments,
-            paidAmount,
-            balanceRemaining,
+            totalPaid,
+            balance,
+            paidAmount: totalPaid,
+            balanceRemaining: balance,
         });
     }
     catch (err) {
@@ -436,19 +477,14 @@ router.post("/:id/approve", requireAdmin_1.requireAdmin, async (req, res) => {
  * POST /api/invoices/:id/mark-paid
  * ADMIN ONLY
  */
-router.post("/:id/mark-paid", requireAdmin_1.requireAdmin, async (req, res) => {
+router.post("/:id/mark-paid", requireAdmin_1.requireAdmin, (0, validate_1.validate)(markPaidParamsSchema, "params"), (0, validate_1.validate)(markPaidBodySchema), async (req, res) => {
     var _a;
     try {
         if (!req.user)
             return res.status(401).json({ error: "Unauthorized" });
         const { id } = req.params;
         const { amount, method, reference } = req.body;
-        if (!amount || amount <= 0) {
-            return res.status(400).json({ error: "Invalid payment amount" });
-        }
-        if (!method || typeof method !== "string") {
-            return res.status(400).json({ error: "Payment method required" });
-        }
+        // Zod has already validated amount, method, reference.
         const invoice = await prisma.invoice.findFirst({
             where: {
                 id,
@@ -501,7 +537,7 @@ router.post("/:id/mark-paid", requireAdmin_1.requireAdmin, async (req, res) => {
         });
     }
     catch (err) {
-        console.error("Error marking invoice as paid:", err);
+        console.error("Error marking invoice as paid", err);
         res.status(500).json({ error: "Failed to mark invoice as paid" });
     }
 });

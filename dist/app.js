@@ -54,6 +54,7 @@ const billingRules_1 = __importDefault(require("./routes/billingRules"));
 const stripe_1 = __importStar(require("./routes/stripe"));
 const serviceTypes_1 = __importDefault(require("./routes/serviceTypes"));
 const cmDashboard_1 = __importDefault(require("./routes/cmDashboard"));
+const errorHandler_1 = require("./middleware/errorHandler");
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
@@ -81,6 +82,7 @@ app.use("/api/dashboard", auth_2.authMiddleware, dashboard_1.default);
 app.use("/api/reports", auth_2.authMiddleware, reports_1.default);
 app.use("/api/service-types", auth_2.authMiddleware, serviceTypes_1.default);
 app.use("/api/cm", auth_2.authMiddleware, cmDashboard_1.default);
+app.use(errorHandler_1.errorHandler);
 // 🔹 Admin-only user management
 app.use("/api/users", auth_2.authMiddleware, users_1.default);
 // 🔹 Org billing rules (GET for any authed user, POST is admin-only inside the route)
