@@ -391,21 +391,81 @@ router.post("/:id/notes", async (req: AuthRequest, res) => {
         .json({ error: "You are not allowed to add notes for this client." });
     }
 
-    const note = await prisma.note.create({
+    const note = await prisma.clientNote.create({
       data: {
-        orgId: req.user.orgId,
+
         clientId: id,
         authorId: req.user.userId,
         content: content.trim(),
       },
     });
 
-    return res.status(201).json(note);
+    return res.status(201).json({
+      id: note.id,
+      content: note.content,
+      createdAt: note.createdAt,
+      authorId: note.authorId,
+    });
   } catch (err) {
     console.error("Error creating note", err);
     return res.status(500).json({ error: "Failed to create note" });
   }
 });
+
+/**
+ * DELETE /api/clients/:clientId/notes/:noteId
+ * Admins can delete any note in their org.
+ * Care managers can delete notes they authored OR for clients where they are primary CM.
+ */
+router.delete("/:clientId/notes/:noteId", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { clientId, noteId } = req.params;
+
+    const note = await prisma.clientNote.findFirst({
+      where: {
+        id: noteId,
+        clientId,
+        client: {
+          orgId: req.user.orgId,
+        },
+      },
+      include: {
+        client: {
+          select: {
+            primaryCMId: true,
+          },
+        },
+      },
+    });
+
+    if (!note) {
+      return res.status(404).json({ error: "Note not found" });
+    }
+
+    const isAdmin = req.user.role === "admin";
+    const isAuthor = note.authorId === req.user.userId;
+    const isPrimaryCM = note.client?.primaryCMId === req.user.userId;
+
+    if (!isAdmin && !isAuthor && !isPrimaryCM) {
+      return res
+        .status(403)
+        .json({ error: "You are not allowed to delete this note." });
+    }
+
+    await prisma.clientNote.delete({
+      where: { id: note.id },
+    });
+
+    return res.status(204).send();
+  } catch (err) {
+    console.error("Error deleting note", err);
+    return res.status(500).json({ error: "Failed to delete note" });
+  }
+});
+
+
 
 /**
  * GET /api/clients/:id/billing-rules
