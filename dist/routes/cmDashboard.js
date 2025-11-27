@@ -2,11 +2,16 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const client_1 = require("@prisma/client");
-const prisma = new client_1.PrismaClient();
 const router = (0, express_1.Router)();
+const prisma = new client_1.PrismaClient();
 /**
  * GET /api/cm/summary
- * Summary for the currently logged-in care manager
+ * Summary for the currently logged-in care manager:
+ *  - todayHours
+ *  - weekHours (last 7 days)
+ *  - assignedClients
+ *  - recentActivities
+ *  - upcomingVisits (future activities with source="visit")
  */
 router.get("/summary", async (req, res) => {
     try {
@@ -16,29 +21,44 @@ router.get("/summary", async (req, res) => {
         const cmId = req.user.userId;
         const orgId = req.user.orgId;
         const now = new Date();
+        // Today range
+        const startToday = new Date(now);
+        startToday.setHours(0, 0, 0, 0);
+        const endToday = new Date(now);
+        endToday.setHours(23, 59, 59, 999);
+        // Last 7 days
         const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-        const [last7, last30, recentActivities] = await Promise.all([
+        const [todayActivities, weekActivities, assignedClientsCount, recentActivities, upcomingVisitsRaw,] = await Promise.all([
             prisma.activity.findMany({
                 where: {
                     orgId,
                     cmId,
-                    startTime: { gte: sevenDaysAgo },
+                    startTime: {
+                        gte: startToday,
+                        lte: endToday,
+                    },
                 },
-                include: {
-                    client: true,
-                    serviceType: true,
+                select: {
+                    duration: true,
                 },
-                orderBy: { startTime: "desc" },
             }),
             prisma.activity.findMany({
                 where: {
                     orgId,
                     cmId,
-                    startTime: { gte: thirtyDaysAgo },
+                    startTime: {
+                        gte: sevenDaysAgo,
+                    },
                 },
-                // no include needed here for summary, only duration/isBillable
-                orderBy: { startTime: "desc" },
+                select: {
+                    duration: true,
+                },
+            }),
+            prisma.client.count({
+                where: {
+                    orgId,
+                    primaryCMId: cmId,
+                },
             }),
             prisma.activity.findMany({
                 where: {
@@ -46,38 +66,67 @@ router.get("/summary", async (req, res) => {
                     cmId,
                 },
                 include: {
-                    client: true,
-                    serviceType: true,
+                    client: { select: { name: true } },
+                    serviceType: { select: { name: true } },
                 },
-                orderBy: { startTime: "desc" },
-                take: 8,
+                orderBy: {
+                    startTime: "desc",
+                },
+                take: 10,
+            }),
+            prisma.activity.findMany({
+                where: {
+                    orgId,
+                    cmId,
+                    startTime: {
+                        gt: now,
+                    },
+                    OR: [
+                        { source: "visit" },
+                        { source: "Visit" },
+                        { source: "VISIT" },
+                    ],
+                },
+                include: {
+                    client: { select: { name: true } },
+                    serviceType: { select: { name: true } },
+                },
+                orderBy: {
+                    startTime: "asc",
+                },
+                take: 5,
             }),
         ]);
-        // just care about duration + isBillable
-        const sumMinutes = (rows, billableOnly = false) => rows.reduce((sum, a) => {
-            if (billableOnly && !a.isBillable)
-                return sum;
-            return sum + (a.duration || 0);
-        }, 0);
-        const last7Minutes = sumMinutes(last7);
-        const last7BillableMinutes = sumMinutes(last7, true);
-        const last7Hours = last7Minutes / 60;
-        const last7BillableHours = last7BillableMinutes / 60;
-        const last30Minutes = sumMinutes(last30);
-        const last30Hours = last30Minutes / 60;
+        const sumMinutes = (rows) => rows.reduce((sum, a) => sum + (a.duration || 0), 0);
+        const todayHours = sumMinutes(todayActivities) / 60;
+        const weekHours = sumMinutes(weekActivities) / 60;
+        const recentActivitiesMapped = recentActivities.map((a) => {
+            var _a, _b, _c, _d;
+            return ({
+                id: a.id,
+                startTime: a.startTime,
+                duration: a.duration,
+                isBillable: a.isBillable,
+                client: { name: (_b = (_a = a.client) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : null },
+                serviceType: { name: (_d = (_c = a.serviceType) === null || _c === void 0 ? void 0 : _c.name) !== null && _d !== void 0 ? _d : null },
+            });
+        });
+        const upcomingVisits = upcomingVisitsRaw.map((a) => {
+            var _a, _b, _c, _d;
+            return ({
+                id: a.id,
+                startTime: a.startTime,
+                duration: a.duration,
+                clientName: (_b = (_a = a.client) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : "Unknown client",
+                serviceName: (_d = (_c = a.serviceType) === null || _c === void 0 ? void 0 : _c.name) !== null && _d !== void 0 ? _d : "Visit",
+            });
+        });
         return res.json({
-            metrics: {
-                last7Days: {
-                    activitiesCount: last7.length,
-                    hours: Number(last7Hours.toFixed(2)),
-                    billableHours: Number(last7BillableHours.toFixed(2)),
-                },
-                last30Days: {
-                    activitiesCount: last30.length,
-                    hours: Number(last30Hours.toFixed(2)),
-                },
-            },
-            recentActivities,
+            todayHours: Number(todayHours.toFixed(2)),
+            weekHours: Number(weekHours.toFixed(2)),
+            assignedClients: assignedClientsCount,
+            recentActivities: recentActivitiesMapped,
+            upcomingVisits,
         });
     }
     catch (err) {

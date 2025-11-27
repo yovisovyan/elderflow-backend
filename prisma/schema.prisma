@@ -8,23 +8,22 @@ generator client {
 }
 
 model Organization {
-  id           String   @id @default(uuid())
-  name         String
-  contactEmail String
-  billingPlan  String
-  billingRulesJson Json?  
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id               String   @id @default(uuid())
+  name             String
+  contactEmail     String
+  billingPlan      String
+  billingRulesJson Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  users      User[]
-  clients    Client[]
-  activities Activity[]
-  invoices   Invoice[]
-  payments   Payment[]
-  reports    Report[]
-  auditLogs  AuditLog[]
+  users        User[]
+  clients      Client[]
+  activities   Activity[]
+  invoices     Invoice[]
+  payments     Payment[]
+  reports      Report[]
+  auditLogs    AuditLog[]
   serviceTypes ServiceType[]
-
 }
 
 model User {
@@ -41,22 +40,23 @@ model User {
   title           String?
   phone           String?
 
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  activities Activity[]
-  auditLogs  AuditLog[]
-  clients    Client[]   @relation("PrimaryCM")
-
-
+  activities  Activity[]
+  auditLogs   AuditLog[]
+  clients     Client[]     @relation("PrimaryCM")
+  clientNotes ClientNote[] @relation("UserToClientNotes")
 }
 
 model Client {
-  id                  String       @id @default(uuid())
-  orgId               String
-  org                 Organization @relation(fields: [orgId], references: [id])
-  primaryCMId         String?
-  primaryCM           User?        @relation("PrimaryCM", fields: [primaryCMId], references: [id])
+  id    String       @id @default(uuid())
+  orgId String
+  org   Organization @relation(fields: [orgId], references: [id])
+
+  primaryCMId String?
+  primaryCM   User?   @relation("PrimaryCM", fields: [primaryCMId], references: [id])
+
   name                String
   dob                 DateTime
   address             String
@@ -65,23 +65,24 @@ model Client {
   billingContactPhone String
   billingRulesJson    Json
   status              String
-  createdAt           DateTime     @default(now())
-  updatedAt           DateTime     @updatedAt
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
   activities Activity[]
   invoices   Invoice[]
-  
+  notes      ClientNote[]
 }
 
-
 model Activity {
-  id           String       @id @default(uuid())
-  orgId        String
-  clientId     String
-  cmId         String
-  org          Organization @relation(fields: [orgId], references: [id])
-  client       Client       @relation(fields: [clientId], references: [id])
-  cm           User         @relation(fields: [cmId], references: [id])
+  id       String @id @default(uuid())
+  orgId    String
+  clientId String
+  cmId     String
+
+  org    Organization @relation(fields: [orgId], references: [id])
+  client Client       @relation(fields: [clientId], references: [id])
+  cm     User         @relation(fields: [cmId], references: [id])
+
   source       String // phone | email | visit | calendar | manual
   startTime    DateTime
   endTime      DateTime
@@ -91,23 +92,24 @@ model Activity {
   aiConfidence Float
   notes        String
   isFlagged    Boolean
-  capturedByAi Boolean      @default(false)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  capturedByAi Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   serviceTypeId String?
   serviceType   ServiceType? @relation(fields: [serviceTypeId], references: [id])
-
 
   invoiceItems InvoiceItem[]
 }
 
 model Invoice {
-  id          String       @id @default(uuid())
-  orgId       String
-  clientId    String
-  org         Organization @relation(fields: [orgId], references: [id])
-  client      Client       @relation(fields: [clientId], references: [id])
+  id       String @id @default(uuid())
+  orgId    String
+  clientId String
+
+  org    Organization @relation(fields: [orgId], references: [id])
+  client Client       @relation(fields: [clientId], references: [id])
+
   periodStart DateTime
   periodEnd   DateTime
   status      String // draft | sent | paid | overdue
@@ -116,96 +118,99 @@ model Invoice {
   pdfUrl      String?
   sentAt      DateTime?
   paidAt      DateTime?
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   items    InvoiceItem[]
- 
-  payments       Payment[]
+  payments Payment[]
 }
 
 model InvoiceItem {
-  id          String    @id @default(uuid())
-  invoiceId   String
-  activityId  String?
-  invoice     Invoice   @relation(fields: [invoiceId], references: [id])
-  activity    Activity? @relation(fields: [activityId], references: [id])
+  id         String  @id @default(uuid())
+  invoiceId  String
+  activityId String?
+
+  invoice  Invoice   @relation(fields: [invoiceId], references: [id])
+  activity Activity? @relation(fields: [activityId], references: [id])
+
   description String
   quantity    Float
   unitPrice   Float
   amount      Float
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model Note {
   id        String   @id @default(uuid())
   orgId     String
-
   clientId  String
   authorId  String
-
   content   String
   createdAt DateTime @default(now())
 }
 
-
-
 model Payment {
-  id        String   @id @default(uuid())
-  orgId     String
-  org       Organization @relation(fields: [orgId], references: [id])
+  id    String       @id @default(uuid())
+  orgId String
+  org   Organization @relation(fields: [orgId], references: [id])
+
   invoiceId String
-  invoice   Invoice  @relation(fields: [invoiceId], references: [id])
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
 
   amount    Float
-  method    String   // "cash", "check", "bank", "card", "insurance", etc.
+  method    String // "cash", "check", "bank", "card", "insurance", etc.
   status    String   @default("completed") // future: pending, failed
   paidAt    DateTime @default(now())
-  reference String? 
+  reference String?
 
   createdAt DateTime @default(now())
 }
 
 model Report {
-  id          String   @id @default(uuid())
+  id          String       @id @default(uuid())
   orgId       String
   org         Organization @relation(fields: [orgId], references: [id])
   type        String
   periodStart DateTime
   periodEnd   DateTime
   fileUrl     String
-  createdAt   DateTime @default(now())
+  createdAt   DateTime     @default(now())
 }
 
-
 model AuditLog {
-  id     String       @id @default(uuid())
+  id     String  @id @default(uuid())
   orgId  String
   userId String?
-  org    Organization @relation(fields: [orgId], references: [id])
-  user   User?        @relation(fields: [userId], references: [id])
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  user User?        @relation(fields: [userId], references: [id])
 }
 
 model ServiceType {
-  id          String       @id @default(uuid())
-  orgId       String
-  org         Organization @relation(fields: [orgId], references: [id])
+  id    String       @id @default(uuid())
+  orgId String
+  org   Organization @relation(fields: [orgId], references: [id])
+
   name        String
   billingCode String?
-  rateType    String       // "hourly" | "flat"
+  rateType    String // "hourly" | "flat"
   rateAmount  Float
-  isActive    Boolean      @default(true)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  activities  Activity[]
+  activities Activity[]
 }
 
+model ClientNote {
+  id       String @id @default(cuid())
+  clientId String
+  client   Client @relation(fields: [clientId], references: [id])
 
+  authorId String
+  author   User   @relation("UserToClientNotes", fields: [authorId], references: [id])
 
-
-
-
-
-
+  content   String
+  createdAt DateTime @default(now())
+}
