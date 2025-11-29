@@ -6,6 +6,163 @@ const router = Router();
 const prisma = new PrismaClient();
 
 /**
+ * PATCH /api/activities/:id
+ * Update activity fields (source, isBillable, isFlagged, notes).
+ * Admins can edit any activity in their org.
+ * Care managers can only edit their own activities (cmId = req.user.userId).
+ */
+router.patch("/:id", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { id } = req.params;
+    const { source, isBillable, isFlagged, notes } = req.body as {
+      source?: string;
+      isBillable?: boolean;
+      isFlagged?: boolean;
+      notes?: string | null;
+    };
+
+    // Make sure there's at least something to update
+    if (
+      typeof source === "undefined" &&
+      typeof isBillable === "undefined" &&
+      typeof isFlagged === "undefined" &&
+      typeof notes === "undefined"
+    ) {
+      return res.status(400).json({
+        error:
+          "No fields to update. Allowed fields: source, isBillable, isFlagged, notes.",
+      });
+    }
+
+    // Find activity in org
+    const activity = await prisma.activity.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!activity) {
+      return res.status(404).json({ error: "Activity not found" });
+    }
+
+    // Role-based authorization: care managers can only touch their own activities
+    if (req.user.role === "care_manager" && activity.cmId !== req.user.userId) {
+      return res
+        .status(403)
+        .json({ error: "You are not allowed to edit this activity." });
+    }
+
+    // Build update payload only with provided fields
+    const data: any = {};
+
+if (typeof source !== "undefined") {
+  data.source = source || "manual";
+}
+if (typeof isBillable !== "undefined") {
+  data.isBillable = !!isBillable;
+}
+if (typeof isFlagged !== "undefined") {
+  data.isFlagged = !!isFlagged;
+}
+if (typeof notes !== "undefined") {
+  data.notes = notes && notes.trim().length > 0 ? notes.trim() : null;
+}
+
+    // Always track who made this change
+   data.updatedById = req.user.userId;
+
+const currentUser = await prisma.user.findUnique({
+  where: { id: req.user.userId },
+  select: { name: true },
+});
+data.updatedByName = currentUser?.name ?? null;
+
+const updated = await prisma.activity.update({
+  where: { id: activity.id },
+  data,
+});
+
+return res.json(updated);
+  } catch (err) {
+    console.error("Error updating activity:", err);
+    return res.status(500).json({ error: "Failed to update activity" });
+  }
+});
+
+/**
+ * DELETE /api/activities/:id
+ * Delete an activity.
+ * Admins can delete any activity in their org.
+ * Care managers can only delete their own activities.
+ * If the activity has already been invoiced, we block delete to avoid breaking invoices.
+ */
+router.delete("/:id", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { id } = req.params;
+
+    // Find activity in org
+    const activity = await prisma.activity.findFirst({
+  where: {
+    id,
+    orgId: req.user.orgId,
+  },
+  include: {
+    client: true,
+    cm: true,
+    serviceType: true,
+    updatedBy: {
+      select: { name: true },
+    },
+  },
+});
+
+
+    if (!activity) {
+      return res.status(404).json({ error: "Activity not found" });
+    }
+
+    // Role-based authorization
+    if (req.user.role === "care_manager" && activity.cmId !== req.user.userId) {
+      return res
+        .status(403)
+        .json({ error: "You are not allowed to delete this activity." });
+    }
+
+    // Block delete if the activity is already linked to an invoice
+    const invoicedItem = await prisma.invoiceItem.findFirst({
+      where: {
+        activityId: activity.id,
+      },
+    });
+
+    if (invoicedItem) {
+      return res.status(400).json({
+        error:
+          "This activity has already been invoiced. Adjust the invoice instead of deleting the activity.",
+      });
+    }
+
+    await prisma.activity.delete({
+      where: { id: activity.id },
+    });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Error deleting activity:", err);
+    return res.status(500).json({ error: "Failed to delete activity" });
+  }
+});
+
+/**
  * GET /api/activities
  * Query params:
  *  - clientId (optional)
@@ -18,7 +175,10 @@ router.get("/", async (req: AuthRequest, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-    const { clientId, flagged } = req.query;
+    const { clientId, flagged } = req.query as {
+      clientId?: string;
+      flagged?: string;
+    };
 
     const where: any = {
       orgId: req.user.orgId,
@@ -28,7 +188,7 @@ router.get("/", async (req: AuthRequest, res) => {
     if (flagged === "true") where.isFlagged = true;
     if (flagged === "false") where.isFlagged = false;
 
-    // 🔹 Care managers only see activities they logged themselves
+    // Care managers only see activities they logged themselves
     if (req.user.role === "care_manager") {
       where.cmId = req.user.userId;
     }
@@ -56,6 +216,12 @@ router.get("/", async (req: AuthRequest, res) => {
  *
  * Care managers can only see their own activities.
  */
+/**
+ * GET /api/activities/:id
+ * Returns a single activity with related client & care manager.
+ *
+ * Care managers can only see their own activities.
+ */
 router.get("/:id", async (req: AuthRequest, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
@@ -71,6 +237,9 @@ router.get("/:id", async (req: AuthRequest, res) => {
         client: true,
         cm: true,
         serviceType: true,
+        updatedBy: {
+          select: { name: true },
+        },
       },
     });
 
@@ -78,7 +247,7 @@ router.get("/:id", async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Activity not found" });
     }
 
-    // 🔹 Care manager cannot view other users' activities
+    // Care manager cannot view other users' activities
     if (
       req.user.role === "care_manager" &&
       activity.cmId !== req.user.userId
@@ -94,6 +263,7 @@ router.get("/:id", async (req: AuthRequest, res) => {
     res.status(500).json({ error: "Failed to fetch activity" });
   }
 });
+
 
 /**
  * POST /api/activities
@@ -142,7 +312,7 @@ router.post("/", async (req: AuthRequest, res) => {
     const computedDuration =
       duration ?? Math.round((end.getTime() - start.getTime()) / 60000);
 
-    // --- Validate serviceTypeId if provided ---
+    // Validate serviceTypeId if provided
     let finalServiceTypeId: string | null = null;
     if (serviceTypeId) {
       const svc = await prisma.serviceType.findFirst({

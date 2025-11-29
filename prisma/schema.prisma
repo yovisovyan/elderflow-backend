@@ -44,6 +44,8 @@ model User {
   updatedAt DateTime @updatedAt
 
   activities  Activity[]
+  updatedActivities Activity[] @relation("ActivityUpdatedBy")
+
   auditLogs   AuditLog[]
   clients     Client[]     @relation("PrimaryCM")
   clientNotes ClientNote[] @relation("UserToClientNotes")
@@ -99,7 +101,14 @@ model Activity {
   serviceTypeId String?
   serviceType   ServiceType? @relation(fields: [serviceTypeId], references: [id])
 
+  updatedById   String?
+  updatedByName String?
+
+  updatedBy     User? @relation("ActivityUpdatedBy", fields: [updatedById], references: [id])
+
   invoiceItems InvoiceItem[]
+
+  
 }
 
 model Invoice {
