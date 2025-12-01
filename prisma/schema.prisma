@@ -24,6 +24,15 @@ model Organization {
   reports      Report[]
   auditLogs    AuditLog[]
   serviceTypes ServiceType[]
+
+  // NEW: Enhanced client profile entities
+  clientContacts    ClientContact[]
+  clientProviders   ClientProvider[]
+  clientMedications ClientMedication[]
+  clientAllergies   ClientAllergy[]
+  clientInsurances  ClientInsurance[]
+  clientRisks       ClientRisk[]
+  clientDocuments   ClientDocument[]
 }
 
 model User {
@@ -43,7 +52,7 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  activities  Activity[]
+  activities        Activity[]
   updatedActivities Activity[] @relation("ActivityUpdatedBy")
 
   auditLogs   AuditLog[]
@@ -67,12 +76,32 @@ model Client {
   billingContactPhone String
   billingRulesJson    Json
   status              String
+
+  preferredName          String?
+  primaryDiagnosis       String?
+  livingSituation        String?
+  riskFlags              Json?
+  primaryLanguage        String?
+  insurance              String?
+  physicianName          String?
+  physicianPhone         String?
+  environmentSafetyNotes String?
+
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
   activities Activity[]
   invoices   Invoice[]
   notes      ClientNote[]
+
+  // NEW: Enhanced profile relations
+  contacts    ClientContact[]
+  providers   ClientProvider[]
+  medications ClientMedication[]
+  allergies   ClientAllergy[]
+  insurances  ClientInsurance[]
+  risks       ClientRisk[]
+  documents   ClientDocument[]
 }
 
 model Activity {
@@ -107,8 +136,6 @@ model Activity {
   updatedBy     User? @relation("ActivityUpdatedBy", fields: [updatedById], references: [id])
 
   invoiceItems InvoiceItem[]
-
-  
 }
 
 model Invoice {
@@ -222,4 +249,168 @@ model ClientNote {
 
   content   String
   createdAt DateTime @default(now())
+}
+
+// =============================
+// NEW MODELS FOR MINI-PHASE 2A
+// =============================
+
+model ClientContact {
+  id       String       @id @default(uuid())
+  orgId    String
+  org      Organization @relation(fields: [orgId], references: [id])
+
+  clientId String
+  client   Client       @relation(fields: [clientId], references: [id])
+
+  name         String
+  relationship String?
+  phone        String?
+  email        String?
+  address      String?
+  notes        String?
+
+  isEmergencyContact Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([clientId])
+}
+
+model ClientProvider {
+  id       String       @id @default(uuid())
+  orgId    String
+  org      Organization @relation(fields: [orgId], references: [id])
+
+  clientId String
+  client   Client       @relation(fields: [clientId], references: [id])
+
+  type      String      // "physician", "attorney", "facility", "therapist", etc.
+  name      String
+  specialty String?
+  phone     String?
+  email     String?
+  address   String?
+  notes     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([clientId])
+  @@index([type])
+}
+
+model ClientMedication {
+  id       String       @id @default(uuid())
+  orgId    String
+  org      Organization @relation(fields: [orgId], references: [id])
+
+  clientId String
+  client   Client       @relation(fields: [clientId], references: [id])
+
+  name                String
+  dosage              String?   // "10 mg", "1 tab"
+  frequency           String?   // "BID", "once daily"
+  route               String?   // "PO", "IV", "topical"
+  prescribingProvider String?
+  notes               String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([clientId])
+  @@index([name])
+}
+
+model ClientAllergy {
+  id       String       @id @default(uuid())
+  orgId    String
+  org      Organization @relation(fields: [orgId], references: [id])
+
+  clientId String
+  client   Client       @relation(fields: [clientId], references: [id])
+
+  allergen String
+  reaction String?   // "rash", "anaphylaxis"
+  severity String?   // "mild", "moderate", "severe"
+  notes    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([clientId])
+  @@index([allergen])
+}
+
+model ClientInsurance {
+  id       String       @id @default(uuid())
+  orgId    String
+  org      Organization @relation(fields: [orgId], references: [id])
+
+  clientId String
+  client   Client       @relation(fields: [clientId], references: [id])
+
+  insuranceType String?  // "Medicare", "Medicaid", "PPO", etc.
+  carrier       String?
+  policyNumber  String?
+  groupNumber   String?
+  memberId      String?
+  phone         String?
+  notes         String?
+
+  primary Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([clientId])
+  @@index([carrier])
+}
+
+model ClientRisk {
+  id       String       @id @default(uuid())
+  orgId    String
+  org      Organization @relation(fields: [orgId], references: [id])
+
+  clientId String
+  client   Client       @relation(fields: [clientId], references: [id])
+
+  category String   // "fall risk", "wandering", "cognition", etc.
+  severity String?  // "low", "medium", "high"
+  notes    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([clientId])
+  @@index([category])
+}
+
+model ClientDocument {
+  id       String       @id @default(uuid())
+  orgId    String
+  org      Organization @relation(fields: [orgId], references: [id])
+
+  clientId String
+  client   Client       @relation(fields: [clientId], references: [id])
+
+  title    String
+  fileUrl  String
+  fileType String?     // "pdf", "docx", "jpg", etc.
+  category String?     // "Power of Attorney", "Advance Directive", etc.
+
+  uploadedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([clientId])
+  @@index([category])
 }

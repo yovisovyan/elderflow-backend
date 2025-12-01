@@ -162,6 +162,17 @@ router.post("/", async (req: AuthRequest, res) => {
       primaryCMId,
       billingRulesJson,
       status,
+
+      preferredName,
+      primaryDiagnosis,
+      livingSituation,
+      riskFlags,
+      primaryLanguage,
+      insurance,
+      physicianName,
+      physicianPhone,
+      environmentSafetyNotes,
+
     } = req.body;
 
     if (!name || !dob || !address || !billingContactName) {
@@ -180,6 +191,8 @@ router.post("/", async (req: AuthRequest, res) => {
         billingContactPhone,
         billingRulesJson: billingRulesJson || {},
         status: status || "active",
+
+        
       },
     });
 
@@ -572,5 +585,1548 @@ router.post(
     }
   }
 );
+
+/**
+ * GET /api/clients/:id/contacts
+ * Returns contacts for a client (family, POA, emergency, etc.)
+ * Care managers can only access contacts for their own clients.
+ */
+router.get("/:id/contacts", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    // Ensure client belongs to same org
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    // Care manager cannot access another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res
+        .status(403)
+        .json({ error: "You are not allowed to access this client's contacts." });
+    }
+
+    const contacts = await prisma.clientContact.findMany({
+      where: {
+        clientId: client.id,
+        orgId: req.user.orgId,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return res.json(contacts);
+  } catch (err) {
+    console.error("Error fetching client contacts:", err);
+    return res.status(500).json({ error: "Failed to load contacts." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/contacts
+ * Body: { name, relationship?, phone?, email?, address?, notes?, isEmergencyContact? }
+ * Care managers can only add contacts for their own clients.
+ */
+router.post("/:id/contacts", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    const {
+      name,
+      relationship,
+      phone,
+      email,
+      address,
+      notes,
+      isEmergencyContact,
+    } = req.body as {
+      name?: string;
+      relationship?: string;
+      phone?: string;
+      email?: string;
+      address?: string;
+      notes?: string;
+      isEmergencyContact?: boolean;
+    };
+
+    if (!name) {
+      return res.status(400).json({ error: "Name is required" });
+    }
+
+    // Ensure client belongs to same org
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    // Care manager cannot add contacts for another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to add contacts for this client.",
+      });
+    }
+
+    const contact = await prisma.clientContact.create({
+      data: {
+        orgId: req.user.orgId,
+        clientId: client.id,
+        name,
+        relationship,
+        phone,
+        email,
+        address,
+        notes,
+        isEmergencyContact: Boolean(isEmergencyContact),
+      },
+    });
+
+    return res.status(201).json(contact);
+  } catch (err) {
+    console.error("Error creating client contact:", err);
+    return res.status(500).json({ error: "Failed to create contact." });
+  }
+});
+
+/**
+ * PUT /api/clients/:clientId/contacts/:contactId
+ * Body: partial contact fields
+ */
+router.put("/:clientId/contacts/:contactId", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { clientId, contactId } = req.params;
+    const {
+      name,
+      relationship,
+      phone,
+      email,
+      address,
+      notes,
+      isEmergencyContact,
+    } = req.body as {
+      name?: string;
+      relationship?: string;
+      phone?: string;
+      email?: string;
+      address?: string;
+      notes?: string;
+      isEmergencyContact?: boolean;
+    };
+
+    // Ensure contact exists and belongs to same org & client
+    const contact = await prisma.clientContact.findFirst({
+      where: {
+        id: contactId,
+        clientId,
+        orgId: req.user.orgId,
+      },
+      include: {
+        client: true,
+      },
+    });
+
+    if (!contact) {
+      return res.status(404).json({ error: "Contact not found" });
+    }
+
+    // Care manager cannot edit contacts for another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      contact.client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to edit contacts for this client.",
+      });
+    }
+
+    const updated = await prisma.clientContact.update({
+      where: { id: contactId },
+      data: {
+        name: name ?? contact.name,
+        relationship: relationship ?? contact.relationship,
+        phone: phone ?? contact.phone,
+        email: email ?? contact.email,
+        address: address ?? contact.address,
+        notes: notes ?? contact.notes,
+        ...(typeof isEmergencyContact === "boolean"
+          ? { isEmergencyContact }
+          : {}),
+      },
+    });
+
+    return res.json(updated);
+  } catch (err) {
+    console.error("Error updating client contact:", err);
+    return res.status(500).json({ error: "Failed to update contact." });
+  }
+});
+
+/**
+ * DELETE /api/clients/:clientId/contacts/:contactId
+ */
+router.delete(
+  "/:clientId/contacts/:contactId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, contactId } = req.params;
+
+      const contact = await prisma.clientContact.findFirst({
+        where: {
+          id: contactId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!contact) {
+        return res.status(404).json({ error: "Contact not found" });
+      }
+
+      // Care manager cannot delete contacts for another CM's client
+      if (
+        req.user.role === "care_manager" &&
+        contact.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to delete contacts for this client.",
+        });
+      }
+
+      await prisma.clientContact.delete({
+        where: {
+          id: contactId,
+        },
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error deleting client contact:", err);
+      return res.status(500).json({ error: "Failed to delete contact." });
+    }
+  }
+);
+
+/**
+ * GET /api/clients/:id/providers
+ * Returns providers for a client (physicians, attorneys, facilities, etc.)
+ */
+router.get("/:id/providers", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    // Ensure client belongs to same org
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    // Care manager cannot access another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access this client's providers.",
+      });
+    }
+
+    const providers = await prisma.clientProvider.findMany({
+      where: {
+        clientId: client.id,
+        orgId: req.user.orgId,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return res.json(providers);
+  } catch (err) {
+    console.error("Error fetching client providers:", err);
+    return res.status(500).json({ error: "Failed to load providers." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/providers
+ * Body: { type, name, specialty?, phone?, email?, address?, notes? }
+ */
+router.post("/:id/providers", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    const {
+      type,
+      name,
+      specialty,
+      phone,
+      email,
+      address,
+      notes,
+    } = req.body as {
+      type?: string;
+      name?: string;
+      specialty?: string;
+      phone?: string;
+      email?: string;
+      address?: string;
+      notes?: string;
+    };
+
+    if (!type || !name) {
+      return res
+        .status(400)
+        .json({ error: "Provider type and name are required" });
+    }
+
+    // Ensure client belongs to same org
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    // Care manager cannot add providers for another CM's client
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to add providers for this client.",
+      });
+    }
+
+    const provider = await prisma.clientProvider.create({
+      data: {
+        orgId: req.user.orgId,
+        clientId: client.id,
+        type,
+        name,
+        specialty,
+        phone,
+        email,
+        address,
+        notes,
+      },
+    });
+
+    return res.status(201).json(provider);
+  } catch (err) {
+    console.error("Error creating client provider:", err);
+    return res.status(500).json({ error: "Failed to create provider." });
+  }
+});
+
+/**
+ * PUT /api/clients/:clientId/providers/:providerId
+ * Body: partial provider fields
+ */
+router.put(
+  "/:clientId/providers/:providerId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, providerId } = req.params;
+      const {
+        type,
+        name,
+        specialty,
+        phone,
+        email,
+        address,
+        notes,
+      } = req.body as {
+        type?: string;
+        name?: string;
+        specialty?: string;
+        phone?: string;
+        email?: string;
+        address?: string;
+        notes?: string;
+      };
+
+      // Ensure provider exists and belongs to same org & client
+      const provider = await prisma.clientProvider.findFirst({
+        where: {
+          id: providerId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!provider) {
+        return res.status(404).json({ error: "Provider not found" });
+      }
+
+      // Care manager cannot edit providers for another CM's client
+      if (
+        req.user.role === "care_manager" &&
+        provider.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to edit providers for this client.",
+        });
+      }
+
+      const updated = await prisma.clientProvider.update({
+        where: { id: providerId },
+        data: {
+          type: type ?? provider.type,
+          name: name ?? provider.name,
+          specialty: specialty ?? provider.specialty,
+          phone: phone ?? provider.phone,
+          email: email ?? provider.email,
+          address: address ?? provider.address,
+          notes: notes ?? provider.notes,
+        },
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      console.error("Error updating client provider:", err);
+      return res.status(500).json({ error: "Failed to update provider." });
+    }
+  }
+);
+
+/**
+ * DELETE /api/clients/:clientId/providers/:providerId
+ */
+router.delete(
+  "/:clientId/providers/:providerId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, providerId } = req.params;
+
+      const provider = await prisma.clientProvider.findFirst({
+        where: {
+          id: providerId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!provider) {
+        return res.status(404).json({ error: "Provider not found" });
+      }
+
+      // Care manager cannot delete providers for another CM's client
+      if (
+        req.user.role === "care_manager" &&
+        provider.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to delete providers for this client.",
+        });
+      }
+
+      await prisma.clientProvider.delete({
+        where: { id: providerId },
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error deleting client provider:", err);
+      return res.status(500).json({ error: "Failed to delete provider." });
+    }
+  }
+);
+
+/**
+ * GET /api/clients/:id/medications
+ * Returns medications for a client.
+ */
+router.get("/:id/medications", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access this client's medications.",
+      });
+    }
+
+    const meds = await prisma.clientMedication.findMany({
+      where: {
+        clientId: client.id,
+        orgId: req.user.orgId,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return res.json(meds);
+  } catch (err) {
+    console.error("Error fetching client medications:", err);
+    return res.status(500).json({ error: "Failed to load medications." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/medications
+ * Body: { name, dosage?, frequency?, route?, prescribingProvider?, notes? }
+ */
+router.post("/:id/medications", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    const {
+      name,
+      dosage,
+      frequency,
+      route,
+      prescribingProvider,
+      notes,
+    } = req.body as {
+      name?: string;
+      dosage?: string;
+      frequency?: string;
+      route?: string;
+      prescribingProvider?: string;
+      notes?: string;
+    };
+
+    if (!name) {
+      return res.status(400).json({ error: "Medication name is required" });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to add medications for this client.",
+      });
+    }
+
+    const med = await prisma.clientMedication.create({
+      data: {
+        orgId: req.user.orgId,
+        clientId: client.id,
+        name,
+        dosage,
+        frequency,
+        route,
+        prescribingProvider,
+        notes,
+      },
+    });
+
+    return res.status(201).json(med);
+  } catch (err) {
+    console.error("Error creating client medication:", err);
+    return res.status(500).json({ error: "Failed to create medication." });
+  }
+});
+
+/**
+ * PUT /api/clients/:clientId/medications/:medicationId
+ * Body: partial medication fields
+ */
+router.put(
+  "/:clientId/medications/:medicationId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, medicationId } = req.params;
+      const {
+        name,
+        dosage,
+        frequency,
+        route,
+        prescribingProvider,
+        notes,
+      } = req.body as {
+        name?: string;
+        dosage?: string;
+        frequency?: string;
+        route?: string;
+        prescribingProvider?: string;
+        notes?: string;
+      };
+
+      const med = await prisma.clientMedication.findFirst({
+        where: {
+          id: medicationId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!med) {
+        return res.status(404).json({ error: "Medication not found" });
+      }
+
+      if (
+        req.user.role === "care_manager" &&
+        med.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to edit medications for this client.",
+        });
+      }
+
+      const updated = await prisma.clientMedication.update({
+        where: { id: medicationId },
+        data: {
+          name: name ?? med.name,
+          dosage: dosage ?? med.dosage,
+          frequency: frequency ?? med.frequency,
+          route: route ?? med.route,
+          prescribingProvider:
+            prescribingProvider ?? med.prescribingProvider,
+          notes: notes ?? med.notes,
+        },
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      console.error("Error updating client medication:", err);
+      return res.status(500).json({ error: "Failed to update medication." });
+    }
+  }
+);
+
+/**
+ * DELETE /api/clients/:clientId/medications/:medicationId
+ */
+router.delete(
+  "/:clientId/medications/:medicationId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, medicationId } = req.params;
+
+      const med = await prisma.clientMedication.findFirst({
+        where: {
+          id: medicationId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!med) {
+        return res.status(404).json({ error: "Medication not found" });
+      }
+
+      if (
+        req.user.role === "care_manager" &&
+        med.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to delete medications for this client.",
+        });
+      }
+
+      await prisma.clientMedication.delete({
+        where: { id: medicationId },
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error deleting client medication:", err);
+      return res.status(500).json({ error: "Failed to delete medication." });
+    }
+  }
+);
+
+/**
+ * GET /api/clients/:id/allergies
+ * Returns allergies for a client.
+ */
+router.get("/:id/allergies", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access this client's allergies.",
+      });
+    }
+
+    const allergies = await prisma.clientAllergy.findMany({
+      where: {
+        clientId: client.id,
+        orgId: req.user.orgId,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return res.json(allergies);
+  } catch (err) {
+    console.error("Error fetching client allergies:", err);
+    return res.status(500).json({ error: "Failed to load allergies." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/allergies
+ * Body: { allergen, reaction?, severity?, notes? }
+ */
+router.post("/:id/allergies", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    const { allergen, reaction, severity, notes } = req.body as {
+      allergen?: string;
+      reaction?: string;
+      severity?: string;
+      notes?: string;
+    };
+
+    if (!allergen) {
+      return res.status(400).json({ error: "Allergen is required" });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to add allergies for this client.",
+      });
+    }
+
+    const allergy = await prisma.clientAllergy.create({
+      data: {
+        orgId: req.user.orgId,
+        clientId: client.id,
+        allergen,
+        reaction,
+        severity,
+        notes,
+      },
+    });
+
+    return res.status(201).json(allergy);
+  } catch (err) {
+    console.error("Error creating client allergy:", err);
+    return res.status(500).json({ error: "Failed to create allergy." });
+  }
+});
+
+/**
+ * PUT /api/clients/:clientId/allergies/:allergyId
+ * Body: partial allergy fields
+ */
+router.put(
+  "/:clientId/allergies/:allergyId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, allergyId } = req.params;
+      const { allergen, reaction, severity, notes } = req.body as {
+        allergen?: string;
+        reaction?: string;
+        severity?: string;
+        notes?: string;
+      };
+
+      const allergy = await prisma.clientAllergy.findFirst({
+        where: {
+          id: allergyId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!allergy) {
+        return res.status(404).json({ error: "Allergy not found" });
+      }
+
+      if (
+        req.user.role === "care_manager" &&
+        allergy.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to edit allergies for this client.",
+        });
+      }
+
+      const updated = await prisma.clientAllergy.update({
+        where: { id: allergyId },
+        data: {
+          allergen: allergen ?? allergy.allergen,
+          reaction: reaction ?? allergy.reaction,
+          severity: severity ?? allergy.severity,
+          notes: notes ?? allergy.notes,
+        },
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      console.error("Error updating client allergy:", err);
+      return res.status(500).json({ error: "Failed to update allergy." });
+    }
+  }
+);
+
+/**
+ * DELETE /api/clients/:clientId/allergies/:allergyId
+ */
+router.delete(
+  "/:clientId/allergies/:allergyId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, allergyId } = req.params;
+
+      const allergy = await prisma.clientAllergy.findFirst({
+        where: {
+          id: allergyId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!allergy) {
+        return res.status(404).json({ error: "Allergy not found" });
+      }
+
+      if (
+        req.user.role === "care_manager" &&
+        allergy.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to delete allergies for this client.",
+        });
+      }
+
+      await prisma.clientAllergy.delete({
+        where: { id: allergyId },
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error deleting client allergy:", err);
+      return res.status(500).json({ error: "Failed to delete allergy." });
+    }
+  }
+);
+
+/**
+ * GET /api/clients/:id/insurance
+ * Returns insurance records for a client.
+ */
+router.get("/:id/insurance", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access this client's insurance.",
+      });
+    }
+
+    const insurance = await prisma.clientInsurance.findMany({
+      where: {
+        clientId: client.id,
+        orgId: req.user.orgId,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return res.json(insurance);
+  } catch (err) {
+    console.error("Error fetching client insurance:", err);
+    return res.status(500).json({ error: "Failed to load insurance." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/insurance
+ * Body: { insuranceType?, carrier?, policyNumber?, groupNumber?, memberId?, phone?, notes?, primary? }
+ */
+router.post("/:id/insurance", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    const {
+      insuranceType,
+      carrier,
+      policyNumber,
+      groupNumber,
+      memberId,
+      phone,
+      notes,
+      primary,
+    } = req.body as {
+      insuranceType?: string;
+      carrier?: string;
+      policyNumber?: string;
+      groupNumber?: string;
+      memberId?: string;
+      phone?: string;
+      notes?: string;
+      primary?: boolean;
+    };
+
+    if (!carrier && !insuranceType) {
+      return res.status(400).json({
+        error: "At least carrier or insuranceType is required",
+      });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to add insurance for this client.",
+      });
+    }
+
+    const record = await prisma.clientInsurance.create({
+      data: {
+        orgId: req.user.orgId,
+        clientId: client.id,
+        insuranceType,
+        carrier,
+        policyNumber,
+        groupNumber,
+        memberId,
+        phone,
+        notes,
+        primary: Boolean(primary),
+      },
+    });
+
+    return res.status(201).json(record);
+  } catch (err) {
+    console.error("Error creating client insurance:", err);
+    return res.status(500).json({ error: "Failed to create insurance." });
+  }
+});
+
+/**
+ * PUT /api/clients/:clientId/insurance/:insuranceId
+ * Body: partial insurance fields
+ */
+router.put(
+  "/:clientId/insurance/:insuranceId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, insuranceId } = req.params;
+      const {
+        insuranceType,
+        carrier,
+        policyNumber,
+        groupNumber,
+        memberId,
+        phone,
+        notes,
+        primary,
+      } = req.body as {
+        insuranceType?: string;
+        carrier?: string;
+        policyNumber?: string;
+        groupNumber?: string;
+        memberId?: string;
+        phone?: string;
+        notes?: string;
+        primary?: boolean;
+      };
+
+      const record = await prisma.clientInsurance.findFirst({
+        where: {
+          id: insuranceId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!record) {
+        return res.status(404).json({ error: "Insurance record not found" });
+      }
+
+      if (
+        req.user.role === "care_manager" &&
+        record.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to edit insurance for this client.",
+        });
+      }
+
+      const updated = await prisma.clientInsurance.update({
+        where: { id: insuranceId },
+        data: {
+          insuranceType: insuranceType ?? record.insuranceType,
+          carrier: carrier ?? record.carrier,
+          policyNumber: policyNumber ?? record.policyNumber,
+          groupNumber: groupNumber ?? record.groupNumber,
+          memberId: memberId ?? record.memberId,
+          phone: phone ?? record.phone,
+          notes: notes ?? record.notes,
+          ...(typeof primary === "boolean" ? { primary } : {}),
+        },
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      console.error("Error updating client insurance:", err);
+      return res.status(500).json({ error: "Failed to update insurance." });
+    }
+  }
+);
+
+/**
+ * DELETE /api/clients/:clientId/insurance/:insuranceId
+ */
+router.delete(
+  "/:clientId/insurance/:insuranceId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, insuranceId } = req.params;
+
+      const record = await prisma.clientInsurance.findFirst({
+        where: {
+          id: insuranceId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!record) {
+        return res.status(404).json({ error: "Insurance record not found" });
+      }
+
+      if (
+        req.user.role === "care_manager" &&
+        record.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to delete insurance for this client.",
+        });
+      }
+
+      await prisma.clientInsurance.delete({
+        where: { id: insuranceId },
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error deleting client insurance:", err);
+      return res.status(500).json({ error: "Failed to delete insurance." });
+    }
+  }
+);
+
+/**
+ * GET /api/clients/:id/risks
+ * Returns risk records for a client.
+ */
+router.get("/:id/risks", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access this client's risks.",
+      });
+    }
+
+    const risks = await prisma.clientRisk.findMany({
+      where: {
+        clientId: client.id,
+        orgId: req.user.orgId,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return res.json(risks);
+  } catch (err) {
+    console.error("Error fetching client risks:", err);
+    return res.status(500).json({ error: "Failed to load risks." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/risks
+ * Body: { category, severity?, notes? }
+ */
+router.post("/:id/risks", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    const { category, severity, notes } = req.body as {
+      category?: string;
+      severity?: string;
+      notes?: string;
+    };
+
+    if (!category) {
+      return res.status(400).json({ error: "Risk category is required" });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to add risks for this client.",
+      });
+    }
+
+    const risk = await prisma.clientRisk.create({
+      data: {
+        orgId: req.user.orgId,
+        clientId: client.id,
+        category,
+        severity,
+        notes,
+      },
+    });
+
+    return res.status(201).json(risk);
+  } catch (err) {
+    console.error("Error creating client risk:", err);
+    return res.status(500).json({ error: "Failed to create risk." });
+  }
+});
+
+/**
+ * PUT /api/clients/:clientId/risks/:riskId
+ * Body: partial risk fields
+ */
+router.put(
+  "/:clientId/risks/:riskId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, riskId } = req.params;
+      const { category, severity, notes } = req.body as {
+        category?: string;
+        severity?: string;
+        notes?: string;
+      };
+
+      const risk = await prisma.clientRisk.findFirst({
+        where: {
+          id: riskId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!risk) {
+        return res.status(404).json({ error: "Risk not found" });
+      }
+
+      if (
+        req.user.role === "care_manager" &&
+        risk.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to edit risks for this client.",
+        });
+      }
+
+      const updated = await prisma.clientRisk.update({
+        where: { id: riskId },
+        data: {
+          category: category ?? risk.category,
+          severity: severity ?? risk.severity,
+          notes: notes ?? risk.notes,
+        },
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      console.error("Error updating client risk:", err);
+      return res.status(500).json({ error: "Failed to update risk." });
+    }
+  }
+);
+
+/**
+ * DELETE /api/clients/:clientId/risks/:riskId
+ */
+router.delete(
+  "/:clientId/risks/:riskId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, riskId } = req.params;
+
+      const risk = await prisma.clientRisk.findFirst({
+        where: {
+          id: riskId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!risk) {
+        return res.status(404).json({ error: "Risk not found" });
+      }
+
+      if (
+        req.user.role === "care_manager" &&
+        risk.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to delete risks for this client.",
+        });
+      }
+
+      await prisma.clientRisk.delete({
+        where: { id: riskId },
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error deleting client risk:", err);
+      return res.status(500).json({ error: "Failed to delete risk." });
+    }
+  }
+);
+
+/**
+ * GET /api/clients/:id/documents
+ * Returns documents for a client.
+ */
+router.get("/:id/documents", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access this client's documents.",
+      });
+    }
+
+    const docs = await prisma.clientDocument.findMany({
+      where: {
+        clientId: client.id,
+        orgId: req.user.orgId,
+      },
+      orderBy: { uploadedAt: "asc" },
+    });
+
+    return res.json(docs);
+  } catch (err) {
+    console.error("Error fetching client documents:", err);
+    return res.status(500).json({ error: "Failed to load documents." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/documents
+ * Body: { title, fileUrl, category?, fileType? }
+ */
+router.post("/:id/documents", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    const { title, fileUrl, category, fileType } = req.body as {
+      title?: string;
+      fileUrl?: string;
+      category?: string;
+      fileType?: string;
+    };
+
+    if (!title || !fileUrl) {
+      return res
+        .status(400)
+        .json({ error: "Title and fileUrl are required" });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to add documents for this client.",
+      });
+    }
+
+    const doc = await prisma.clientDocument.create({
+      data: {
+        orgId: req.user.orgId,
+        clientId: client.id,
+        title,
+        fileUrl,
+        category,
+        fileType,
+      },
+    });
+
+    return res.status(201).json(doc);
+  } catch (err) {
+    console.error("Error creating client document:", err);
+    return res.status(500).json({ error: "Failed to create document." });
+  }
+});
+
+/**
+ * DELETE /api/clients/:clientId/documents/:documentId
+ */
+router.delete(
+  "/:clientId/documents/:documentId",
+  async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+      const { clientId, documentId } = req.params;
+
+      const doc = await prisma.clientDocument.findFirst({
+        where: {
+          id: documentId,
+          clientId,
+          orgId: req.user.orgId,
+        },
+        include: {
+          client: true,
+        },
+      });
+
+      if (!doc) {
+        return res.status(404).json({ error: "Document not found" });
+      }
+
+      if (
+        req.user.role === "care_manager" &&
+        doc.client.primaryCMId !== req.user.userId
+      ) {
+        return res.status(403).json({
+          error: "You are not allowed to delete documents for this client.",
+        });
+      }
+
+      await prisma.clientDocument.delete({
+        where: { id: documentId },
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error deleting client document:", err);
+      return res.status(500).json({ error: "Failed to delete document." });
+    }
+  }
+);
+
 
 export default router;
