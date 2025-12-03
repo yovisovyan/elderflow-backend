@@ -55,6 +55,7 @@ const stripe_1 = __importStar(require("./routes/stripe"));
 const serviceTypes_1 = __importDefault(require("./routes/serviceTypes"));
 const cmDashboard_1 = __importDefault(require("./routes/cmDashboard"));
 const errorHandler_1 = require("./middleware/errorHandler");
+const org_1 = __importDefault(require("./routes/org"));
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
@@ -89,6 +90,7 @@ app.use("/api/users", auth_2.authMiddleware, users_1.default);
 app.use("/api/billing/rules", auth_2.authMiddleware, billingRules_1.default);
 // 🔹 Non-webhook Stripe routes (currently stubbed)
 app.use("/api/stripe", stripe_1.default);
+app.use("/api/org", auth_2.authMiddleware, org_1.default);
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
     console.log(`Backend API running on port ${PORT}`);

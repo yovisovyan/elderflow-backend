@@ -227,13 +227,22 @@ model Report {
 }
 
 model AuditLog {
-  id     String  @id @default(uuid())
-  orgId  String
-  userId String?
+  id         String   @id @default(uuid())
+  orgId      String
+  userId     String?
+  entityType String   // e.g. "medication", "risk"
+  entityId   String?  // the ID of the entity, if applicable
+  action     String   // "create", "update", "delete"
+  details    String?  // human-readable description
+  createdAt  DateTime @default(now())
 
   org  Organization @relation(fields: [orgId], references: [id])
   user User?        @relation(fields: [userId], references: [id])
+
+  @@index([orgId])
+  @@index([entityType, entityId])
 }
+
 
 model ServiceType {
   id    String       @id @default(uuid())
