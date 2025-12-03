@@ -33,6 +33,10 @@ model Organization {
   clientInsurances  ClientInsurance[]
   clientRisks       ClientRisk[]
   clientDocuments   ClientDocument[]
+
+  carePlans     CarePlan[]
+  progressNotes ProgressNote[]
+
 }
 
 model User {
@@ -58,6 +62,10 @@ model User {
   auditLogs   AuditLog[]
   clients     Client[]     @relation("PrimaryCM")
   clientNotes ClientNote[] @relation("UserToClientNotes")
+
+  createdCarePlans CarePlan[]      @relation("CarePlanCreatedBy")
+  progressNotes    ProgressNote[]  @relation("UserToProgressNotes")
+
 }
 
 model Client {
@@ -102,6 +110,10 @@ model Client {
   insurances  ClientInsurance[]
   risks       ClientRisk[]
   documents   ClientDocument[]
+
+  carePlans     CarePlan[]
+  progressNotes ProgressNote[]
+
 }
 
 model Activity {
@@ -414,3 +426,77 @@ model ClientDocument {
   @@index([clientId])
   @@index([category])
 }
+
+model CarePlan {
+  id       String       @id @default(uuid())
+  orgId    String
+  org      Organization @relation(fields: [orgId], references: [id])
+
+  clientId String
+  client   Client       @relation(fields: [clientId], references: [id])
+
+  title       String
+  status      String      // "active", "completed", "archived"
+  startDate   DateTime?
+  targetDate  DateTime?
+  summary     String?
+
+  goals CarePlanGoal[]
+
+  createdById String?
+  createdBy   User? @relation("CarePlanCreatedBy", fields: [createdById], references: [id])
+
+  progressNotes ProgressNote[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([clientId])
+  @@index([status])
+}
+
+model CarePlanGoal {
+  id         String    @id @default(uuid())
+  carePlanId String
+  carePlan   CarePlan  @relation(fields: [carePlanId], references: [id], onDelete: Cascade)
+
+  title       String
+  description String?
+  status      String    // "active", "completed", "deferred"
+  priority    String?   // "low", "medium", "high"
+  targetDate  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([carePlanId])
+}
+
+model ProgressNote {
+  id       String       @id @default(uuid())
+  orgId    String
+  org      Organization @relation(fields: [orgId], references: [id])
+
+  clientId String
+  client   Client       @relation(fields: [clientId], references: [id])
+
+  authorId String
+  author   User         @relation("UserToProgressNotes", fields: [authorId], references: [id])
+
+  date     DateTime     // the date of the visit / interaction
+  noteType String?      // "visit", "phone", "check-in", "carePlanUpdate", etc.
+  content  String
+
+  carePlanId String?
+  carePlan   CarePlan? @relation(fields: [carePlanId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([clientId])
+  @@index([authorId])
+  @@index([carePlanId])
+}
+

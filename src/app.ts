@@ -18,6 +18,8 @@ import stripeRouter, { stripeWebhookHandler } from "./routes/stripe";
 import serviceTypesRoutes from "./routes/serviceTypes";
 import cmDashboardRoutes from "./routes/cmDashboard";
 import { errorHandler } from "./middleware/errorHandler";
+import orgRouter from "./routes/org";
+
 
 
 
@@ -73,6 +75,9 @@ app.use("/api/billing/rules", authMiddleware, billingRulesRoutes);
 
 // 🔹 Non-webhook Stripe routes (currently stubbed)
 app.use("/api/stripe", stripeRouter);
+
+app.use("/api/org", authMiddleware, orgRouter);
+
 
 const PORT = process.env.PORT || 4000;
 

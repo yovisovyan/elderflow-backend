@@ -2,9 +2,39 @@ import { Router } from "express";
 import { PrismaClient } from "@prisma/client";
 import { AuthRequest } from "../middleware/auth";
 import { requireAdmin } from "../middleware/requireAdmin";
+import PDFDocument from "pdfkit";
 
 const router = Router();
 const prisma = new PrismaClient();
+
+// Simple reusable audit logger for meds & risks (and more later)
+async function logAudit(
+  req: AuthRequest,
+  params: {
+    entityType: string;
+    entityId?: string;
+    action: string;
+    details?: string;
+  }
+) {
+  if (!req.user) return;
+
+  try {
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user.orgId,
+        userId: req.user.userId,
+        entityType: params.entityType,
+        entityId: params.entityId ?? null,
+        action: params.action,
+        details: params.details ?? null,
+      },
+    });
+  } catch (err) {
+    // We NEVER want audit logging to crash the main request
+    console.error("Error writing audit log:", err);
+  }
+}
 
 /**
  * GET /api/clients
@@ -19,7 +49,7 @@ router.get("/", async (req: AuthRequest, res) => {
       orgId: req.user.orgId,
     };
 
-    // 🔹 Care managers only see their own clientsa
+    // 🔹 Care managers only see their own clients
     if (req.user.role === "care_manager") {
       where.primaryCMId = req.user.userId;
     }
@@ -51,21 +81,20 @@ router.get("/:id", async (req: AuthRequest, res) => {
     const { id } = req.params;
 
     const client = await prisma.client.findFirst({
-  where: {
-    id,
-    orgId: req.user.orgId,
-  },
-  include: {
-    primaryCM: {
-      select: {
-        id: true,
-        name: true,
-        profileImageUrl: true,
+      where: {
+        id,
+        orgId: req.user.orgId,
       },
-    },
-  },
-});
-
+      include: {
+        primaryCM: {
+          select: {
+            id: true,
+            name: true,
+            profileImageUrl: true,
+          },
+        },
+      },
+    });
 
     if (!client) {
       return res.status(404).json({ error: "Client not found" });
@@ -104,10 +133,7 @@ router.get("/:id", async (req: AuthRequest, res) => {
       },
     });
 
-    const totalMinutes = activities.reduce(
-      (sum, a) => sum + a.duration,
-      0
-    );
+    const totalMinutes = activities.reduce((sum, a) => sum + a.duration, 0);
     const totalHoursBilled = totalMinutes / 60;
 
     // outstanding balance
@@ -141,7 +167,6 @@ router.get("/:id", async (req: AuthRequest, res) => {
   }
 });
 
-
 /**
  * POST /api/clients
  * Creates a new client (admin only for now).
@@ -162,7 +187,6 @@ router.post("/", async (req: AuthRequest, res) => {
       primaryCMId,
       billingRulesJson,
       status,
-
       preferredName,
       primaryDiagnosis,
       livingSituation,
@@ -172,7 +196,6 @@ router.post("/", async (req: AuthRequest, res) => {
       physicianName,
       physicianPhone,
       environmentSafetyNotes,
-
     } = req.body;
 
     if (!name || !dob || !address || !billingContactName) {
@@ -191,8 +214,16 @@ router.post("/", async (req: AuthRequest, res) => {
         billingContactPhone,
         billingRulesJson: billingRulesJson || {},
         status: status || "active",
-
-        
+        // extra fields can be wired here later:
+        // preferredName,
+        // primaryDiagnosis,
+        // livingSituation,
+        // riskFlags,
+        // primaryLanguage,
+        // insurance,
+        // physicianName,
+        // physicianPhone,
+        // environmentSafetyNotes,
       },
     });
 
@@ -246,6 +277,7 @@ router.patch("/:id", async (req: AuthRequest, res) => {
 /**
  * PUT /api/clients/:id
  * Updates client info + billing rules.
+ * Includes safety rule for "active" status.
  */
 router.put("/:id", async (req: AuthRequest, res) => {
   try {
@@ -276,6 +308,42 @@ router.put("/:id", async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Client not found" });
     }
 
+    // Compute what the new values will be
+    const nextStatus: string =
+      typeof status === "string" ? status : existing.status;
+
+    const nextPhone: string =
+      typeof billingContactPhone === "string"
+        ? billingContactPhone
+        : existing.billingContactPhone;
+
+    // --- Safety: enforce mandatory fields when setting status to "active" ---
+    if (nextStatus === "active") {
+      if (!nextPhone || !nextPhone.trim()) {
+        return res.status(400).json({
+          error:
+            "To mark a client as Active, a primary contact phone is required.",
+        });
+      }
+
+      const insuranceRecord = await prisma.clientInsurance.findFirst({
+        where: {
+          clientId: existing.id,
+          orgId: req.user.orgId,
+          NOT: {
+            policyNumber: null,
+          },
+        },
+      });
+
+      if (!insuranceRecord || !insuranceRecord.policyNumber) {
+        return res.status(400).json({
+          error:
+            "To mark a client as Active, at least one insurance record with a Policy # is required.",
+        });
+      }
+    }
+
     const updated = await prisma.client.update({
       where: { id: existing.id },
       data: {
@@ -283,10 +351,11 @@ router.put("/:id", async (req: AuthRequest, res) => {
         dob: dob ? new Date(dob) : existing.dob,
         address: address ?? existing.address,
         billingContactName: billingContactName ?? existing.billingContactName,
-        billingContactEmail: billingContactEmail ?? existing.billingContactEmail,
-        billingContactPhone: billingContactPhone ?? existing.billingContactPhone,
+        billingContactEmail:
+          billingContactEmail ?? existing.billingContactEmail,
+        billingContactPhone: nextPhone,
         billingRulesJson: billingRulesJson ?? existing.billingRulesJson,
-        status: status ?? existing.status,
+        status: nextStatus,
       },
     });
 
@@ -297,10 +366,9 @@ router.put("/:id", async (req: AuthRequest, res) => {
   }
 });
 
+
 /**
  * GET /api/clients/:id/notes
- * Returns notes for a client (most recent first)
- * Care managers can only access notes for their own clients.
  */
 router.get("/:id/notes", async (req: AuthRequest, res) => {
   try {
@@ -366,11 +434,8 @@ router.get("/:id/notes", async (req: AuthRequest, res) => {
   }
 });
 
-
 /**
  * POST /api/clients/:id/notes
- * Body: { content: string }
- * Care managers can only add notes for their own clients.
  */
 router.post("/:id/notes", async (req: AuthRequest, res) => {
   try {
@@ -406,7 +471,6 @@ router.post("/:id/notes", async (req: AuthRequest, res) => {
 
     const note = await prisma.clientNote.create({
       data: {
-
         clientId: id,
         authorId: req.user.userId,
         content: content.trim(),
@@ -427,8 +491,6 @@ router.post("/:id/notes", async (req: AuthRequest, res) => {
 
 /**
  * DELETE /api/clients/:clientId/notes/:noteId
- * Admins can delete any note in their org.
- * Care managers can delete notes they authored OR for clients where they are primary CM.
  */
 router.delete("/:clientId/notes/:noteId", async (req: AuthRequest, res) => {
   try {
@@ -478,12 +540,8 @@ router.delete("/:clientId/notes/:noteId", async (req: AuthRequest, res) => {
   }
 });
 
-
-
 /**
  * GET /api/clients/:id/billing-rules
- * Returns org-level and client-specific billing rules.
- * Care managers can only access billing rules for their own clients.
  */
 router.get("/:id/billing-rules", async (req: AuthRequest, res) => {
   try {
@@ -588,8 +646,6 @@ router.post(
 
 /**
  * GET /api/clients/:id/contacts
- * Returns contacts for a client (family, POA, emergency, etc.)
- * Care managers can only access contacts for their own clients.
  */
 router.get("/:id/contacts", async (req: AuthRequest, res) => {
   try {
@@ -636,8 +692,6 @@ router.get("/:id/contacts", async (req: AuthRequest, res) => {
 
 /**
  * POST /api/clients/:id/contacts
- * Body: { name, relationship?, phone?, email?, address?, notes?, isEmergencyContact? }
- * Care managers can only add contacts for their own clients.
  */
 router.post("/:id/contacts", async (req: AuthRequest, res) => {
   try {
@@ -711,7 +765,6 @@ router.post("/:id/contacts", async (req: AuthRequest, res) => {
 
 /**
  * PUT /api/clients/:clientId/contacts/:contactId
- * Body: partial contact fields
  */
 router.put("/:clientId/contacts/:contactId", async (req: AuthRequest, res) => {
   try {
@@ -836,7 +889,6 @@ router.delete(
 
 /**
  * GET /api/clients/:id/providers
- * Returns providers for a client (physicians, attorneys, facilities, etc.)
  */
 router.get("/:id/providers", async (req: AuthRequest, res) => {
   try {
@@ -883,7 +935,6 @@ router.get("/:id/providers", async (req: AuthRequest, res) => {
 
 /**
  * POST /api/clients/:id/providers
- * Body: { type, name, specialty?, phone?, email?, address?, notes? }
  */
 router.post("/:id/providers", async (req: AuthRequest, res) => {
   try {
@@ -959,7 +1010,6 @@ router.post("/:id/providers", async (req: AuthRequest, res) => {
 
 /**
  * PUT /api/clients/:clientId/providers/:providerId
- * Body: partial provider fields
  */
 router.put(
   "/:clientId/providers/:providerId",
@@ -1083,7 +1133,6 @@ router.delete(
 
 /**
  * GET /api/clients/:id/medications
- * Returns medications for a client.
  */
 router.get("/:id/medications", async (req: AuthRequest, res) => {
   try {
@@ -1188,6 +1237,17 @@ router.post("/:id/medications", async (req: AuthRequest, res) => {
       },
     });
 
+    // Audit log: created medication
+    const medLabel = [med.name, med.dosage, med.frequency]
+      .filter(Boolean)
+      .join(" ");
+    await logAudit(req, {
+      entityType: "medication",
+      entityId: med.id,
+      action: "create",
+      details: `Added medication: ${medLabel || med.name}`,
+    });
+
     return res.status(201).json(med);
   } catch (err) {
     console.error("Error creating client medication:", err);
@@ -1259,10 +1319,52 @@ router.put(
         },
       });
 
+      // Audit log: updated medication
+      const changes: string[] = [];
+
+      if (name && name !== med.name) {
+        changes.push(`name: "${med.name}" -> "${name}"`);
+      }
+      if (dosage && dosage !== med.dosage) {
+        changes.push(`dosage: "${med.dosage ?? ""}" -> "${dosage}"`);
+      }
+      if (frequency && frequency !== med.frequency) {
+        changes.push(
+          `frequency: "${med.frequency ?? ""}" -> "${frequency}"`
+        );
+      }
+      if (route && route !== med.route) {
+        changes.push(`route: "${med.route ?? ""}" -> "${route}"`);
+      }
+      if (
+        prescribingProvider &&
+        prescribingProvider !== med.prescribingProvider
+      ) {
+        changes.push(
+          `prescribingProvider: "${med.prescribingProvider ?? ""}" -> "${prescribingProvider}"`
+        );
+      }
+
+      const medLabel = [med.name, med.dosage, med.frequency]
+        .filter(Boolean)
+        .join(" ");
+
+      await logAudit(req, {
+        entityType: "medication",
+        entityId: med.id,
+        action: "update",
+        details:
+          changes.length > 0
+            ? `Updated medication ${medLabel || med.name}: ${changes.join(
+                "; "
+              )}`
+            : `Updated medication ${medLabel || med.name}`,
+      });
+
       return res.json(updated);
     } catch (err) {
       console.error("Error updating client medication:", err);
-      return res.status(500).json({ error: "Failed to update medication." });
+      return res.status(500).json({ error: "Failed to update medication" });
     }
   }
 );
@@ -1306,6 +1408,17 @@ router.delete(
         where: { id: medicationId },
       });
 
+      const medLabel = [med.name, med.dosage, med.frequency]
+        .filter(Boolean)
+        .join(" ");
+
+      await logAudit(req, {
+        entityType: "medication",
+        entityId: med.id,
+        action: "delete",
+        details: `Deleted medication: ${medLabel || med.name}`,
+      });
+
       return res.json({ ok: true });
     } catch (err) {
       console.error("Error deleting client medication:", err);
@@ -1316,7 +1429,6 @@ router.delete(
 
 /**
  * GET /api/clients/:id/allergies
- * Returns allergies for a client.
  */
 router.get("/:id/allergies", async (req: AuthRequest, res) => {
   try {
@@ -1361,7 +1473,6 @@ router.get("/:id/allergies", async (req: AuthRequest, res) => {
 
 /**
  * POST /api/clients/:id/allergies
- * Body: { allergen, reaction?, severity?, notes? }
  */
 router.post("/:id/allergies", async (req: AuthRequest, res) => {
   try {
@@ -1419,7 +1530,6 @@ router.post("/:id/allergies", async (req: AuthRequest, res) => {
 
 /**
  * PUT /api/clients/:clientId/allergies/:allergyId
- * Body: partial allergy fields
  */
 router.put(
   "/:clientId/allergies/:allergyId",
@@ -1526,7 +1636,6 @@ router.delete(
 
 /**
  * GET /api/clients/:id/insurance
- * Returns insurance records for a client.
  */
 router.get("/:id/insurance", async (req: AuthRequest, res) => {
   try {
@@ -1571,7 +1680,6 @@ router.get("/:id/insurance", async (req: AuthRequest, res) => {
 
 /**
  * POST /api/clients/:id/insurance
- * Body: { insuranceType?, carrier?, policyNumber?, groupNumber?, memberId?, phone?, notes?, primary? }
  */
 router.post("/:id/insurance", async (req: AuthRequest, res) => {
   try {
@@ -1648,7 +1756,6 @@ router.post("/:id/insurance", async (req: AuthRequest, res) => {
 
 /**
  * PUT /api/clients/:clientId/insurance/:insuranceId
- * Body: partial insurance fields
  */
 router.put(
   "/:clientId/insurance/:insuranceId",
@@ -1772,7 +1879,6 @@ router.delete(
 
 /**
  * GET /api/clients/:id/risks
- * Returns risk records for a client.
  */
 router.get("/:id/risks", async (req: AuthRequest, res) => {
   try {
@@ -1864,6 +1970,17 @@ router.post("/:id/risks", async (req: AuthRequest, res) => {
       },
     });
 
+    const riskLabel = `${risk.category}${
+      risk.severity ? ` (${risk.severity})` : ""
+    }`;
+
+    await logAudit(req, {
+      entityType: "risk",
+      entityId: risk.id,
+      action: "create",
+      details: `Added risk: ${riskLabel}`,
+    });
+
     return res.status(201).json(risk);
   } catch (err) {
     console.error("Error creating client risk:", err);
@@ -1921,6 +2038,36 @@ router.put(
         },
       });
 
+      const changes: string[] = [];
+
+      if (category && category !== risk.category) {
+        changes.push(`category: "${risk.category}" -> "${category}"`);
+      }
+      if (severity && severity !== risk.severity) {
+        changes.push(
+          `severity: "${risk.severity ?? ""}" -> "${severity}"`
+        );
+      }
+      if (notes && notes !== risk.notes) {
+        changes.push(
+          `notes changed (length ${risk.notes?.length ?? 0} -> ${notes.length})`
+        );
+      }
+
+      const riskLabel = `${risk.category}${
+        risk.severity ? ` (${risk.severity})` : ""
+      }`;
+
+      await logAudit(req, {
+        entityType: "risk",
+        entityId: risk.id,
+        action: "update",
+        details:
+          changes.length > 0
+            ? `Updated risk ${riskLabel}: ${changes.join("; ")}`
+            : `Updated risk ${riskLabel}`,
+      });
+
       return res.json(updated);
     } catch (err) {
       console.error("Error updating client risk:", err);
@@ -1968,6 +2115,17 @@ router.delete(
         where: { id: riskId },
       });
 
+      const riskLabel = `${risk.category}${
+        risk.severity ? ` (${risk.severity})` : ""
+      }`;
+
+      await logAudit(req, {
+        entityType: "risk",
+        entityId: risk.id,
+        action: "delete",
+        details: `Deleted risk: ${riskLabel}`,
+      });
+
       return res.json({ ok: true });
     } catch (err) {
       console.error("Error deleting client risk:", err);
@@ -1978,7 +2136,6 @@ router.delete(
 
 /**
  * GET /api/clients/:id/documents
- * Returns documents for a client.
  */
 router.get("/:id/documents", async (req: AuthRequest, res) => {
   try {
@@ -2127,6 +2284,599 @@ router.delete(
     }
   }
 );
+
+/**
+ * Care Plans & Goals & Progress Notes (already good; no audit for now)
+ * ... (these routes are unchanged except for previous additions) ...
+ * (kept from your code, so I won't repeat the entire block here to avoid confusion)
+ * You can keep your existing care-plans/goals/progress-notes routes as-is.
+ */
+
+/**
+ * GET /api/clients/:id/face-sheet
+ * Generate a 1-page Emergency Face Sheet PDF for the client.
+ */
+router.get("/:id/face-sheet", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    // Load client + related safety/billing data (similar to clientSnapshot)
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+      include: {
+        contacts: true,
+        medications: true,
+        allergies: true,
+        risks: true,
+        insurances: true,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    // Primary contact: emergency contact -> first contact -> billing contact
+    const emergency = client.contacts.find((c) => c.isEmergencyContact);
+    const firstContact = client.contacts[0];
+
+    const primaryContactName =
+      emergency?.name ||
+      firstContact?.name ||
+      client.billingContactName ||
+      null;
+    const primaryContactPhone =
+      emergency?.phone ||
+      firstContact?.phone ||
+      client.billingContactPhone ||
+      null;
+    const primaryContactEmail =
+      emergency?.email ||
+      firstContact?.email ||
+      client.billingContactEmail ||
+      null;
+
+    // Medications
+    const medCount = client.medications.length;
+
+    // Allergies: choose severe first, else first
+    const allergyCount = client.allergies.length;
+    const severeAllergy =
+      client.allergies.find(
+        (a) => (a.severity ?? "").toLowerCase() === "severe"
+      ) || client.allergies[0] || null;
+
+    const topAllergyLabel = severeAllergy
+      ? `${severeAllergy.allergen}${
+          severeAllergy.severity ? ` (${severeAllergy.severity})` : ""
+        }`
+      : null;
+
+    // Risks: choose high first, else first
+    const riskCount = client.risks.length;
+    const highRisk =
+      client.risks.find(
+        (r) => (r.severity ?? "").toLowerCase() === "high"
+      ) || client.risks[0] || null;
+
+    const topRisks = client.risks
+      .slice(0, 3)
+      .map((r) => `${r.category}${r.severity ? ` (${r.severity})` : ""}`);
+
+    // Insurance: primary or first
+    const primaryInsurance =
+      client.insurances.find((i) => i.primary) || client.insurances[0] || null;
+
+    const primaryInsuranceLabel = primaryInsurance
+      ? [primaryInsurance.carrier, primaryInsurance.insuranceType]
+          .filter(Boolean)
+          .join(" · ")
+      : null;
+
+    // --- PDF generation ---
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 50,
+    });
+
+    const safeName = client.name.replace(/[^a-z0-9_\- ]/gi, "_");
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeName}_face_sheet.pdf"`
+    );
+
+    doc.pipe(res);
+
+    // Title
+    doc.fontSize(18).text("Emergency Face Sheet", { align: "center" }).moveDown(0.5);
+
+    doc
+      .fontSize(10)
+      .text(`Generated: ${new Date().toLocaleString()}`, {
+        align: "center",
+      })
+      .moveDown(1.5);
+
+    // Client identity
+    doc.fontSize(14).text(client.name, { align: "left" }).moveDown(0.3);
+
+    doc
+      .fontSize(10)
+      .text(
+        client.preferredName ? `Preferred name: ${client.preferredName}` : "",
+        { continued: false }
+      );
+    doc.text(
+      client.primaryDiagnosis ? `Primary dx: ${client.primaryDiagnosis}` : ""
+    );
+    doc.moveDown(0.5);
+
+    // Contact + address row
+    if (client.address) {
+      doc.text(`Address: ${client.address}`);
+    }
+    if (primaryContactName || primaryContactPhone || primaryContactEmail) {
+      doc.moveDown(0.3).fontSize(11).text("Primary Contact:", {
+        underline: true,
+      });
+      doc.fontSize(10);
+      if (primaryContactName) {
+        doc.text(`Name: ${primaryContactName}`);
+      }
+      if (primaryContactPhone) {
+        doc.text(`Phone: ${primaryContactPhone}`);
+      }
+      if (primaryContactEmail) {
+        doc.text(`Email: ${primaryContactEmail}`);
+      }
+    }
+
+    doc.moveDown(0.8);
+
+    // Insurance block
+    doc.fontSize(11).text("Insurance & Billing", { underline: true }).moveDown(0.3);
+    doc.fontSize(10);
+    if (primaryInsurance) {
+      if (primaryInsuranceLabel) {
+        doc.text(primaryInsuranceLabel);
+      }
+      if (primaryInsurance.policyNumber) {
+        doc.text(`Policy #: ${primaryInsurance.policyNumber}`);
+      }
+      if (primaryInsurance.groupNumber) {
+        doc.text(`Group #: ${primaryInsurance.groupNumber}`);
+      }
+      if (primaryInsurance.memberId) {
+        doc.text(`Member ID: ${primaryInsurance.memberId}`);
+      }
+      if (primaryInsurance.phone) {
+        doc.text(`Phone: ${primaryInsurance.phone}`);
+      }
+    } else {
+      doc.text("No insurance on file.");
+    }
+
+    doc.moveDown(0.8);
+
+    // Allergies block
+    doc.fontSize(11).text("Allergies", { underline: true }).moveDown(0.3);
+    doc.fontSize(10);
+
+    if (allergyCount === 0) {
+      doc.text("No allergies recorded.");
+    } else {
+      doc.text(`Total: ${allergyCount}`, { continued: !!topAllergyLabel });
+      if (topAllergyLabel) {
+        doc.text(`   Top: ${topAllergyLabel}`);
+      }
+      client.allergies.slice(0, 5).forEach((a) => {
+        doc.text(
+          `• ${a.allergen}${
+            a.reaction ? ` – ${a.reaction}` : ""
+          }${a.severity ? ` (${a.severity})` : ""}`
+        );
+      });
+    }
+
+    doc.moveDown(0.8);
+
+    // Medications block
+    doc.fontSize(11).text("Medications", { underline: true }).moveDown(0.3);
+    doc.fontSize(10);
+
+    if (medCount === 0) {
+      doc.text("No medications recorded.");
+    } else {
+      doc.text(`Total: ${medCount}`);
+      client.medications.slice(0, 10).forEach((m) => {
+        const line = [m.name, m.dosage, m.frequency, m.route]
+          .filter(Boolean)
+          .join(" – ");
+        doc.text(`• ${line}`);
+      });
+    }
+
+    doc.moveDown(0.8);
+
+    // Risks block
+    doc.fontSize(11).text("Risks & Safety Flags", { underline: true }).moveDown(0.3);
+    doc.fontSize(10);
+
+    if (riskCount === 0) {
+      doc.text("No risks recorded.");
+    } else {
+      doc.text(`Total: ${riskCount}`);
+      if (topRisks.length > 0) {
+        doc.text("Top risks:");
+        topRisks.forEach((r) => {
+          doc.text(`• ${r}`);
+        });
+      }
+    }
+
+    // Footer
+    doc.moveDown(1);
+    doc
+      .fontSize(8)
+      .fillColor("gray")
+      .text(
+        "This face sheet is for emergency reference only. Refer to ElderFlow for the latest information.",
+        { align: "center" }
+      );
+
+    doc.end();
+  } catch (err) {
+    console.error("Error generating face sheet:", err);
+    return res.status(500).json({ error: "Failed to generate face sheet." });
+  }
+});
+
+/**
+ * GET /api/clients/:id/care-plans
+ * List care plans for a client.
+ */
+router.get("/:id/care-plans", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access care plans for this client.",
+      });
+    }
+
+    const plans = await prisma.carePlan.findMany({
+      where: {
+        clientId: client.id,
+        orgId: req.user.orgId,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    return res.json(plans);
+  } catch (err) {
+    console.error("Error fetching care plans:", err);
+    return res.status(500).json({ error: "Failed to load care plans." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/care-plans
+ * Body: { title, status?, startDate?, targetDate?, summary? }
+ */
+router.post("/:id/care-plans", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    const {
+      title,
+      status,
+      startDate,
+      targetDate,
+      summary,
+    } = req.body as {
+      title?: string;
+      status?: string;
+      startDate?: string;
+      targetDate?: string;
+      summary?: string;
+    };
+
+    if (!title) {
+      return res.status(400).json({ error: "Care plan title is required" });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to create care plans for this client.",
+      });
+    }
+
+    const plan = await prisma.carePlan.create({
+      data: {
+        orgId: req.user.orgId,
+        clientId: client.id,
+        title,
+        status: status || "active",
+        summary,
+        startDate: startDate ? new Date(startDate) : null,
+        targetDate: targetDate ? new Date(targetDate) : null,
+        createdById: req.user.userId,
+      },
+    });
+
+    return res.status(201).json(plan);
+  } catch (err) {
+    console.error("Error creating care plan:", err);
+    return res.status(500).json({ error: "Failed to create care plan." });
+  }
+});
+
+/**
+ * GET /api/clients/:id/progress-notes
+ * List structured progress notes for a client.
+ */
+router.get("/:id/progress-notes", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access progress notes for this client.",
+      });
+    }
+
+    const notes = await prisma.progressNote.findMany({
+      where: {
+        clientId: client.id,
+        orgId: req.user.orgId,
+      },
+      orderBy: { date: "desc" },
+      include: {
+        author: true,
+        carePlan: true,
+      },
+    });
+
+    return res.json(notes);
+  } catch (err) {
+    console.error("Error fetching progress notes:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to load progress notes." });
+  }
+});
+
+/**
+ * POST /api/clients/:id/progress-notes
+ * Body: { date?, noteType?, content, carePlanId? }
+ */
+router.post("/:id/progress-notes", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+    const {
+      date,
+      noteType,
+      content,
+      carePlanId,
+    } = req.body as {
+      date?: string;
+      noteType?: string;
+      content?: string;
+      carePlanId?: string;
+    };
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: "Note content is required" });
+    }
+
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to add progress notes for this client.",
+      });
+    }
+
+    let planId: string | null = null;
+    if (carePlanId) {
+      const plan = await prisma.carePlan.findFirst({
+        where: {
+          id: carePlanId,
+          clientId: client.id,
+          orgId: req.user.orgId,
+        },
+      });
+      if (plan) {
+        planId = plan.id;
+      }
+    }
+
+    const note = await prisma.progressNote.create({
+      data: {
+        orgId: req.user.orgId,
+        clientId: client.id,
+        authorId: req.user.userId,
+        date: date ? new Date(date) : new Date(),
+        noteType,
+        content: content.trim(),
+        carePlanId: planId,
+      },
+      include: {
+        author: true,
+        carePlan: true,
+      },
+    });
+
+    return res.status(201).json(note);
+  } catch (err) {
+    console.error("Error creating progress note:", err);
+    return res.status(500).json({ error: "Failed to create progress note." });
+  }
+});
+
+/**
+ * GET /api/clients/:id/audit-logs
+ * Returns audit logs for this client, currently medications & risks.
+ */
+router.get("/:id/audit-logs", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { id } = req.params;
+
+    // Make sure client exists and belongs to org
+    const client = await prisma.client.findFirst({
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+    });
+
+    if (!client) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    // Care managers can only access their own clients
+    if (
+      req.user.role === "care_manager" &&
+      client.primaryCMId !== req.user.userId
+    ) {
+      return res.status(403).json({
+        error: "You are not allowed to access this client's audit logs.",
+      });
+    }
+
+    // Get IDs of this client's meds and risks
+    const [meds, risks] = await Promise.all([
+      prisma.clientMedication.findMany({
+        where: { clientId: client.id, orgId: req.user.orgId },
+        select: { id: true },
+      }),
+      prisma.clientRisk.findMany({
+        where: { clientId: client.id, orgId: req.user.orgId },
+        select: { id: true },
+      }),
+    ]);
+
+    const medIds = meds.map((m) => m.id);
+    const riskIds = risks.map((r) => r.id);
+
+    if (medIds.length === 0 && riskIds.length === 0) {
+      return res.json([]); // nothing to show yet
+    }
+
+    const orFilters: any[] = [];
+    if (medIds.length > 0) {
+      orFilters.push({
+        entityType: "medication",
+        entityId: { in: medIds },
+      });
+    }
+    if (riskIds.length > 0) {
+      orFilters.push({
+        entityType: "risk",
+        entityId: { in: riskIds },
+      });
+    }
+
+    const logs = await prisma.auditLog.findMany({
+      where: {
+        orgId: req.user.orgId,
+        OR: orFilters,
+      },
+      include: {
+        user: true,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+    });
+
+    // Return a cleaner payload
+    return res.json(
+      logs.map((log) => ({
+        id: log.id,
+        entityType: log.entityType,
+        entityId: log.entityId,
+        action: log.action,
+        details: log.details,
+        createdAt: log.createdAt,
+        userName: log.user?.name ?? log.user?.email ?? null,
+      }))
+    );
+  } catch (err) {
+    console.error("Error fetching audit logs:", err);
+    return res.status(500).json({ error: "Failed to load audit logs." });
+  }
+});
 
 
 export default router;
