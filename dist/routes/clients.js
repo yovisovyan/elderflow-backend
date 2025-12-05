@@ -185,6 +185,12 @@ router.post("/", async (req, res) => {
                 // environmentSafetyNotes,
             },
         });
+        await logAudit(req, {
+            entityType: "client",
+            entityId: client.id,
+            action: "create",
+            details: `Created client "${client.name}" with status ${client.status}`,
+        });
         res.status(201).json(client);
     }
     catch (err) {
@@ -214,6 +220,12 @@ router.patch("/:id", async (req, res) => {
                 ...(billingContactPhone !== undefined ? { billingContactPhone } : {}),
                 ...(billingRulesJson !== undefined ? { billingRulesJson } : {}),
             },
+        });
+        await logAudit(req, {
+            entityType: "client",
+            entityId: updated.id,
+            action: "update",
+            details: `Updated client "${updated.name}" (status: ${updated.status})`,
         });
         return res.json(updated);
     }
@@ -386,6 +398,12 @@ router.post("/:id/notes", async (req, res) => {
                 content: content.trim(),
             },
         });
+        await logAudit(req, {
+            entityType: "client_note",
+            entityId: note.id,
+            action: "create",
+            details: `Added note for client ${id}`,
+        });
         return res.status(201).json({
             id: note.id,
             content: note.content,
@@ -436,6 +454,12 @@ router.delete("/:clientId/notes/:noteId", async (req, res) => {
         }
         await prisma.clientNote.delete({
             where: { id: note.id },
+        });
+        await logAudit(req, {
+            entityType: "client_note",
+            entityId: note.id,
+            action: "delete",
+            details: `Deleted note for client ${note.clientId}`,
         });
         return res.status(204).send();
     }
@@ -613,6 +637,12 @@ router.post("/:id/contacts", async (req, res) => {
                 isEmergencyContact: Boolean(isEmergencyContact),
             },
         });
+        await logAudit(req, {
+            entityType: "contact",
+            entityId: contact.id,
+            action: "create",
+            details: `Added contact "${contact.name}" for client ${client.id}`,
+        });
         return res.status(201).json(contact);
     }
     catch (err) {
@@ -664,6 +694,12 @@ router.put("/:clientId/contacts/:contactId", async (req, res) => {
                     : {}),
             },
         });
+        await logAudit(req, {
+            entityType: "contact",
+            entityId: updated.id,
+            action: "update",
+            details: `Updated contact "${updated.name}" for client ${updated.clientId}`,
+        });
         return res.json(updated);
     }
     catch (err) {
@@ -703,6 +739,12 @@ router.delete("/:clientId/contacts/:contactId", async (req, res) => {
             where: {
                 id: contactId,
             },
+        });
+        await logAudit(req, {
+            entityType: "contact",
+            entityId: contact.id,
+            action: "delete",
+            details: `Deleted contact "${contact.name}" for client ${contact.clientId}`,
         });
         return res.json({ ok: true });
     }
@@ -794,6 +836,12 @@ router.post("/:id/providers", async (req, res) => {
                 notes,
             },
         });
+        await logAudit(req, {
+            entityType: "provider",
+            entityId: provider.id,
+            action: "create",
+            details: `Added provider "${provider.name}" (${provider.type}) for client ${client.id}`,
+        });
         return res.status(201).json(provider);
     }
     catch (err) {
@@ -843,6 +891,12 @@ router.put("/:clientId/providers/:providerId", async (req, res) => {
                 notes: notes !== null && notes !== void 0 ? notes : provider.notes,
             },
         });
+        await logAudit(req, {
+            entityType: "provider",
+            entityId: updated.id,
+            action: "update",
+            details: `Updated provider "${updated.name}" for client ${updated.clientId}`,
+        });
         return res.json(updated);
     }
     catch (err) {
@@ -880,6 +934,12 @@ router.delete("/:clientId/providers/:providerId", async (req, res) => {
         }
         await prisma.clientProvider.delete({
             where: { id: providerId },
+        });
+        await logAudit(req, {
+            entityType: "provider",
+            entityId: provider.id,
+            action: "delete",
+            details: `Deleted provider "${provider.name}" for client ${provider.clientId}`,
         });
         return res.json({ ok: true });
     }
@@ -1179,6 +1239,12 @@ router.post("/:id/allergies", async (req, res) => {
                 notes,
             },
         });
+        await logAudit(req, {
+            entityType: "allergy",
+            entityId: allergy.id,
+            action: "create",
+            details: `Added allergy "${allergy.allergen}" for client ${allergy.clientId}`,
+        });
         return res.status(201).json(allergy);
     }
     catch (err) {
@@ -1223,6 +1289,12 @@ router.put("/:clientId/allergies/:allergyId", async (req, res) => {
                 notes: notes !== null && notes !== void 0 ? notes : allergy.notes,
             },
         });
+        await logAudit(req, {
+            entityType: "allergy",
+            entityId: updated.id,
+            action: "update",
+            details: `Updated allergy "${updated.allergen}" for client ${updated.clientId}`,
+        });
         return res.json(updated);
     }
     catch (err) {
@@ -1259,6 +1331,12 @@ router.delete("/:clientId/allergies/:allergyId", async (req, res) => {
         }
         await prisma.clientAllergy.delete({
             where: { id: allergyId },
+        });
+        await logAudit(req, {
+            entityType: "allergy",
+            entityId: allergy.id,
+            action: "delete",
+            details: `Deleted allergy "${allergy.allergen}" for client ${allergy.clientId}`,
         });
         return res.json({ ok: true });
     }
@@ -1308,6 +1386,7 @@ router.get("/:id/insurance", async (req, res) => {
  * POST /api/clients/:id/insurance
  */
 router.post("/:id/insurance", async (req, res) => {
+    var _a;
     try {
         if (!req.user)
             return res.status(401).json({ error: "Unauthorized" });
@@ -1347,6 +1426,12 @@ router.post("/:id/insurance", async (req, res) => {
                 primary: Boolean(primary),
             },
         });
+        await logAudit(req, {
+            entityType: "insurance",
+            entityId: record.id,
+            action: "create",
+            details: `Added insurance "${(_a = record.carrier) !== null && _a !== void 0 ? _a : ""}" for client ${record.clientId}`,
+        });
         return res.status(201).json(record);
     }
     catch (err) {
@@ -1358,6 +1443,7 @@ router.post("/:id/insurance", async (req, res) => {
  * PUT /api/clients/:clientId/insurance/:insuranceId
  */
 router.put("/:clientId/insurance/:insuranceId", async (req, res) => {
+    var _a;
     try {
         if (!req.user)
             return res.status(401).json({ error: "Unauthorized" });
@@ -1395,6 +1481,12 @@ router.put("/:clientId/insurance/:insuranceId", async (req, res) => {
                 ...(typeof primary === "boolean" ? { primary } : {}),
             },
         });
+        await logAudit(req, {
+            entityType: "insurance",
+            entityId: updated.id,
+            action: "update",
+            details: `Updated insurance "${(_a = updated.carrier) !== null && _a !== void 0 ? _a : ""}" for client ${updated.clientId}`,
+        });
         return res.json(updated);
     }
     catch (err) {
@@ -1406,6 +1498,7 @@ router.put("/:clientId/insurance/:insuranceId", async (req, res) => {
  * DELETE /api/clients/:clientId/insurance/:insuranceId
  */
 router.delete("/:clientId/insurance/:insuranceId", async (req, res) => {
+    var _a;
     try {
         if (!req.user)
             return res.status(401).json({ error: "Unauthorized" });
@@ -1431,6 +1524,12 @@ router.delete("/:clientId/insurance/:insuranceId", async (req, res) => {
         }
         await prisma.clientInsurance.delete({
             where: { id: insuranceId },
+        });
+        await logAudit(req, {
+            entityType: "insurance",
+            entityId: record.id,
+            action: "delete",
+            details: `Deleted insurance "${(_a = record.carrier) !== null && _a !== void 0 ? _a : ""}" for client ${record.clientId}`,
         });
         return res.json({ ok: true });
     }
@@ -1712,6 +1811,12 @@ router.post("/:id/documents", async (req, res) => {
                 fileType,
             },
         });
+        await logAudit(req, {
+            entityType: "document",
+            entityId: doc.id,
+            action: "create",
+            details: `Added document "${doc.title}" for client ${doc.clientId}`,
+        });
         return res.status(201).json(doc);
     }
     catch (err) {
@@ -1748,6 +1853,12 @@ router.delete("/:clientId/documents/:documentId", async (req, res) => {
         }
         await prisma.clientDocument.delete({
             where: { id: documentId },
+        });
+        await logAudit(req, {
+            entityType: "document",
+            entityId: doc.id,
+            action: "delete",
+            details: `Deleted document "${doc.title}" for client ${doc.clientId}`,
         });
         return res.json({ ok: true });
     }

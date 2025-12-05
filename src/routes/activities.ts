@@ -6,6 +6,37 @@ const router = Router();
 const prisma = new PrismaClient();
 
 /**
+ * Simple reusable audit logger for activities (and other entities if needed)
+ */
+async function logAudit(
+  req: AuthRequest,
+  params: {
+    entityType: string;
+    entityId?: string;
+    action: string;
+    details?: string;
+  }
+) {
+  if (!req.user) return;
+
+  try {
+    await prisma.auditLog.create({
+      data: {
+        orgId: req.user.orgId,
+        userId: req.user.userId,
+        entityType: params.entityType,
+        entityId: params.entityId ?? null,
+        action: params.action,
+        details: params.details ?? null,
+      },
+    });
+  } catch (err) {
+    // Never let audit logging crash the main request
+    console.error("Error writing activity audit log:", err);
+  }
+}
+
+/**
  * PATCH /api/activities/:id
  * Update activity fields (source, isBillable, isFlagged, notes).
  * Admins can edit any activity in their org.
@@ -60,34 +91,67 @@ router.patch("/:id", async (req: AuthRequest, res) => {
     // Build update payload only with provided fields
     const data: any = {};
 
-if (typeof source !== "undefined") {
-  data.source = source || "manual";
-}
-if (typeof isBillable !== "undefined") {
-  data.isBillable = !!isBillable;
-}
-if (typeof isFlagged !== "undefined") {
-  data.isFlagged = !!isFlagged;
-}
-if (typeof notes !== "undefined") {
-  data.notes = notes && notes.trim().length > 0 ? notes.trim() : null;
-}
+    if (typeof source !== "undefined") {
+      data.source = source || "manual";
+    }
+    if (typeof isBillable !== "undefined") {
+      data.isBillable = !!isBillable;
+    }
+    if (typeof isFlagged !== "undefined") {
+      data.isFlagged = !!isFlagged;
+    }
+    if (typeof notes !== "undefined") {
+      data.notes = notes && notes.trim().length > 0 ? notes.trim() : null;
+    }
 
     // Always track who made this change
-   data.updatedById = req.user.userId;
+    data.updatedById = req.user.userId;
 
-const currentUser = await prisma.user.findUnique({
-  where: { id: req.user.userId },
-  select: { name: true },
-});
-data.updatedByName = currentUser?.name ?? null;
+    const currentUser = await prisma.user.findUnique({
+      where: { id: req.user.userId },
+      select: { name: true },
+    });
+    data.updatedByName = currentUser?.name ?? null;
 
-const updated = await prisma.activity.update({
-  where: { id: activity.id },
-  data,
-});
+    const updated = await prisma.activity.update({
+      where: { id: activity.id },
+      data,
+    });
 
-return res.json(updated);
+    // Audit log: updated activity
+    const changes: string[] = [];
+    if (typeof source !== "undefined" && source !== activity.source) {
+      changes.push(`source: "${activity.source}" -> "${updated.source}"`);
+    }
+    if (typeof isBillable !== "undefined" && !!isBillable !== activity.isBillable) {
+      changes.push(
+        `isBillable: "${activity.isBillable}" -> "${updated.isBillable}"`
+      );
+    }
+    if (typeof isFlagged !== "undefined" && !!isFlagged !== activity.isFlagged) {
+      changes.push(
+        `isFlagged: "${activity.isFlagged}" -> "${updated.isFlagged}"`
+      );
+    }
+    if (typeof notes !== "undefined" && notes !== activity.notes) {
+      const oldLen = activity.notes?.length ?? 0;
+      const newLen = updated.notes?.length ?? 0;
+      changes.push(`notes changed (length ${oldLen} -> ${newLen})`);
+    }
+
+    await logAudit(req, {
+      entityType: "activity",
+      entityId: updated.id,
+      action: "update",
+      details:
+        changes.length > 0
+          ? `Updated activity ${updated.id} for client ${updated.clientId}: ${changes.join(
+              "; "
+            )}`
+          : `Updated activity ${updated.id} for client ${updated.clientId}`,
+    });
+
+    return res.json(updated);
   } catch (err) {
     console.error("Error updating activity:", err);
     return res.status(500).json({ error: "Failed to update activity" });
@@ -111,20 +175,19 @@ router.delete("/:id", async (req: AuthRequest, res) => {
 
     // Find activity in org
     const activity = await prisma.activity.findFirst({
-  where: {
-    id,
-    orgId: req.user.orgId,
-  },
-  include: {
-    client: true,
-    cm: true,
-    serviceType: true,
-    updatedBy: {
-      select: { name: true },
-    },
-  },
-});
-
+      where: {
+        id,
+        orgId: req.user.orgId,
+      },
+      include: {
+        client: true,
+        cm: true,
+        serviceType: true,
+        updatedBy: {
+          select: { name: true },
+        },
+      },
+    });
 
     if (!activity) {
       return res.status(404).json({ error: "Activity not found" });
@@ -153,6 +216,13 @@ router.delete("/:id", async (req: AuthRequest, res) => {
 
     await prisma.activity.delete({
       where: { id: activity.id },
+    });
+
+    await logAudit(req, {
+      entityType: "activity",
+      entityId: activity.id,
+      action: "delete",
+      details: `Deleted activity ${activity.id} for client ${activity.clientId}`,
     });
 
     return res.json({ ok: true });
@@ -216,12 +286,6 @@ router.get("/", async (req: AuthRequest, res) => {
  *
  * Care managers can only see their own activities.
  */
-/**
- * GET /api/activities/:id
- * Returns a single activity with related client & care manager.
- *
- * Care managers can only see their own activities.
- */
 router.get("/:id", async (req: AuthRequest, res) => {
   try {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
@@ -263,7 +327,6 @@ router.get("/:id", async (req: AuthRequest, res) => {
     res.status(500).json({ error: "Failed to fetch activity" });
   }
 });
-
 
 /**
  * POST /api/activities
@@ -352,6 +415,13 @@ router.post("/", async (req: AuthRequest, res) => {
         cm: true,
         serviceType: true,
       },
+    });
+
+    await logAudit(req, {
+      entityType: "activity",
+      entityId: activity.id,
+      action: "create",
+      details: `Created activity ${activity.id} for client ${activity.clientId} (${activity.source})`,
     });
 
     res.status(201).json(activity);

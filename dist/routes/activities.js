@@ -5,13 +5,37 @@ const client_1 = require("@prisma/client");
 const router = (0, express_1.Router)();
 const prisma = new client_1.PrismaClient();
 /**
+ * Simple reusable audit logger for activities (and other entities if needed)
+ */
+async function logAudit(req, params) {
+    var _a, _b;
+    if (!req.user)
+        return;
+    try {
+        await prisma.auditLog.create({
+            data: {
+                orgId: req.user.orgId,
+                userId: req.user.userId,
+                entityType: params.entityType,
+                entityId: (_a = params.entityId) !== null && _a !== void 0 ? _a : null,
+                action: params.action,
+                details: (_b = params.details) !== null && _b !== void 0 ? _b : null,
+            },
+        });
+    }
+    catch (err) {
+        // Never let audit logging crash the main request
+        console.error("Error writing activity audit log:", err);
+    }
+}
+/**
  * PATCH /api/activities/:id
  * Update activity fields (source, isBillable, isFlagged, notes).
  * Admins can edit any activity in their org.
  * Care managers can only edit their own activities (cmId = req.user.userId).
  */
 router.patch("/:id", async (req, res) => {
-    var _a;
+    var _a, _b, _c, _d, _e;
     try {
         if (!req.user) {
             return res.status(401).json({ error: "Unauthorized" });
@@ -67,6 +91,30 @@ router.patch("/:id", async (req, res) => {
         const updated = await prisma.activity.update({
             where: { id: activity.id },
             data,
+        });
+        // Audit log: updated activity
+        const changes = [];
+        if (typeof source !== "undefined" && source !== activity.source) {
+            changes.push(`source: "${activity.source}" -> "${updated.source}"`);
+        }
+        if (typeof isBillable !== "undefined" && !!isBillable !== activity.isBillable) {
+            changes.push(`isBillable: "${activity.isBillable}" -> "${updated.isBillable}"`);
+        }
+        if (typeof isFlagged !== "undefined" && !!isFlagged !== activity.isFlagged) {
+            changes.push(`isFlagged: "${activity.isFlagged}" -> "${updated.isFlagged}"`);
+        }
+        if (typeof notes !== "undefined" && notes !== activity.notes) {
+            const oldLen = (_c = (_b = activity.notes) === null || _b === void 0 ? void 0 : _b.length) !== null && _c !== void 0 ? _c : 0;
+            const newLen = (_e = (_d = updated.notes) === null || _d === void 0 ? void 0 : _d.length) !== null && _e !== void 0 ? _e : 0;
+            changes.push(`notes changed (length ${oldLen} -> ${newLen})`);
+        }
+        await logAudit(req, {
+            entityType: "activity",
+            entityId: updated.id,
+            action: "update",
+            details: changes.length > 0
+                ? `Updated activity ${updated.id} for client ${updated.clientId}: ${changes.join("; ")}`
+                : `Updated activity ${updated.id} for client ${updated.clientId}`,
         });
         return res.json(updated);
     }
@@ -126,6 +174,12 @@ router.delete("/:id", async (req, res) => {
         await prisma.activity.delete({
             where: { id: activity.id },
         });
+        await logAudit(req, {
+            entityType: "activity",
+            entityId: activity.id,
+            action: "delete",
+            details: `Deleted activity ${activity.id} for client ${activity.clientId}`,
+        });
         return res.json({ ok: true });
     }
     catch (err) {
@@ -176,12 +230,6 @@ router.get("/", async (req, res) => {
         res.status(500).json({ error: "Failed to fetch activities" });
     }
 });
-/**
- * GET /api/activities/:id
- * Returns a single activity with related client & care manager.
- *
- * Care managers can only see their own activities.
- */
 /**
  * GET /api/activities/:id
  * Returns a single activity with related client & care manager.
@@ -286,6 +334,12 @@ router.post("/", async (req, res) => {
                 cm: true,
                 serviceType: true,
             },
+        });
+        await logAudit(req, {
+            entityType: "activity",
+            entityId: activity.id,
+            action: "create",
+            details: `Created activity ${activity.id} for client ${activity.clientId} (${activity.source})`,
         });
         res.status(201).json(activity);
     }

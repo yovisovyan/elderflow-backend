@@ -140,4 +140,60 @@ router.put("/settings", requireAdmin_1.requireAdmin, (0, validate_1.validate)(up
         return res.status(500).json({ error: "Failed to update org settings" });
     }
 });
+/**
+ * GET /api/org/audit-logs
+ * Returns recent audit logs for this organization (meds, risks, etc.).
+ * Admins + CMs can view.
+ * Query:
+ *  - limit?: number (default 200)
+ *  - entityType?: string (e.g. "medication", "risk")
+ */
+router.get("/audit-logs", async (req, res) => {
+    try {
+        if (!req.user)
+            return res.status(401).json({ error: "Unauthorized" });
+        const { limit, entityType } = req.query;
+        let take = 200;
+        if (limit) {
+            const parsed = parseInt(limit, 10);
+            if (!Number.isNaN(parsed) && parsed > 0 && parsed <= 1000) {
+                take = parsed;
+            }
+        }
+        const where = {
+            orgId: req.user.orgId,
+        };
+        if (entityType && typeof entityType === "string") {
+            where.entityType = entityType;
+        }
+        const logs = await prisma.auditLog.findMany({
+            where,
+            include: {
+                user: true,
+            },
+            orderBy: {
+                createdAt: "desc",
+            },
+            take,
+        });
+        const payload = logs.map((log) => {
+            var _a, _b, _c, _d;
+            return ({
+                id: log.id,
+                entityType: log.entityType,
+                entityId: log.entityId,
+                action: log.action,
+                details: log.details,
+                createdAt: log.createdAt,
+                userId: log.userId,
+                userName: (_d = (_b = (_a = log.user) === null || _a === void 0 ? void 0 : _a.name) !== null && _b !== void 0 ? _b : (_c = log.user) === null || _c === void 0 ? void 0 : _c.email) !== null && _d !== void 0 ? _d : null,
+            });
+        });
+        return res.json(payload);
+    }
+    catch (err) {
+        console.error("Error fetching org audit logs:", err);
+        return res.status(500).json({ error: "Failed to load audit logs." });
+    }
+});
 exports.default = router;

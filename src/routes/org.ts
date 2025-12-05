@@ -195,4 +195,64 @@ router.put(
   }
 );
 
+/**
+ * GET /api/org/audit-logs
+ * Returns recent audit logs for this organization (meds, risks, etc.).
+ * Admins + CMs can view.
+ * Query:
+ *  - limit?: number (default 200)
+ *  - entityType?: string (e.g. "medication", "risk")
+ */
+router.get("/audit-logs", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { limit, entityType } = req.query;
+
+    let take = 200;
+    if (limit) {
+      const parsed = parseInt(limit as string, 10);
+      if (!Number.isNaN(parsed) && parsed > 0 && parsed <= 1000) {
+        take = parsed;
+      }
+    }
+
+    const where: any = {
+      orgId: req.user.orgId,
+    };
+
+    if (entityType && typeof entityType === "string") {
+      where.entityType = entityType;
+    }
+
+    const logs = await prisma.auditLog.findMany({
+      where,
+      include: {
+        user: true,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take,
+    });
+
+    const payload = logs.map((log) => ({
+      id: log.id,
+      entityType: log.entityType,
+      entityId: log.entityId,
+      action: log.action,
+      details: log.details,
+      createdAt: log.createdAt,
+      userId: log.userId,
+      userName: log.user?.name ?? log.user?.email ?? null,
+    }));
+
+    return res.json(payload);
+  } catch (err) {
+    console.error("Error fetching org audit logs:", err);
+    return res.status(500).json({ error: "Failed to load audit logs." });
+  }
+});
+
+
 export default router;
