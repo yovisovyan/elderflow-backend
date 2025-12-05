@@ -6,6 +6,8 @@ import { AuthRequest } from "../middleware/auth";
 import { requireAdmin } from "../middleware/requireAdmin";
 import { validate } from "../middleware/validate";
 
+
+
 const router = Router();
 const prisma = new PrismaClient();
 
@@ -251,6 +253,71 @@ router.get("/audit-logs", async (req: AuthRequest, res) => {
   } catch (err) {
     console.error("Error fetching org audit logs:", err);
     return res.status(500).json({ error: "Failed to load audit logs." });
+  }
+});
+
+// GET /api/org/settings
+router.get("/settings", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const org = await prisma.organization.findUnique({
+      where: { id: req.user.orgId },
+    });
+
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+
+    const {
+      currencyCode,
+      invoicePrefix,
+      invoiceFooter,
+      brandColor,
+      logoUrl,
+    } = org;
+
+    res.json({
+      currencyCode,
+      invoicePrefix,
+      invoiceFooter,
+      brandColor,
+      logoUrl,
+    });
+  } catch (err) {
+    console.error("Error loading org settings:", err);
+    res.status(500).json({ error: "Failed to load org settings" });
+  }
+});
+
+// PUT /api/org/settings
+router.put("/settings", async (req: AuthRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+
+    const { currencyCode, invoicePrefix, invoiceFooter, brandColor, logoUrl } =
+      req.body || {};
+
+    const updated = await prisma.organization.update({
+      where: { id: req.user.orgId },
+      data: {
+        currencyCode: currencyCode || "USD",
+        invoicePrefix,
+        invoiceFooter,
+        brandColor,
+        logoUrl,
+      },
+      select: {
+        currencyCode: true,
+        invoicePrefix: true,
+        invoiceFooter: true,
+        brandColor: true,
+        logoUrl: true,
+      },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error("Error saving org settings:", err);
+    res.status(500).json({ error: "Failed to save org settings" });
   }
 });
 

@@ -13,6 +13,13 @@ model Organization {
   contactEmail     String
   billingPlan      String
   billingRulesJson Json?
+
+  currencyCode     String   @default("USD") 
+  invoicePrefix    String?                  
+  invoiceFooter    String?                  
+  brandColor       String?                  
+  logoUrl          String?                  
+
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -25,7 +32,6 @@ model Organization {
   auditLogs    AuditLog[]
   serviceTypes ServiceType[]
 
-  // NEW: Enhanced client profile entities
   clientContacts    ClientContact[]
   clientProviders   ClientProvider[]
   clientMedications ClientMedication[]
